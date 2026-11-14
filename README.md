@@ -1,8 +1,9 @@
-# WiFi 密码保护（LSPosed 模块）
+# Wi-Fi Auth Cleanup（LSPosed 模块）
 
 连接 Wi-Fi 时，如果输入的密码不正确，系统设置会先把网络配置（包括密码）保存下来，然后再去连接。于是错误的网络会一直留在“已保存网络”里，需要手动“忘记”。本模块用于在认证失败后自动删除这个刚保存的错误网络。
 
 - Xposed API：**101**
+- 应用包名：`io.github.aetherpx.wifiauthcleanup`
 - 作用域：`com.android.settings`
 - 目标：Android 17 / HyperOS 的设置（`com.android.settings` version 17）
 - 纯 LSPosed 模块，不包含 Activity，也不会在桌面显示启动图标
@@ -24,7 +25,7 @@
 
 ### 使用 GitHub Actions
 
-把本文件夹作为仓库根目录上传到 GitHub，Actions 会自动执行 `.github/workflows/build.yml`，在 `Artifacts` 中下载 `WifiPasswordGuard-release`。
+把本文件夹作为仓库根目录上传到 GitHub，Actions 会自动执行 `.github/workflows/build.yml`，在 `Artifacts` 中下载 `WifiAuthCleanup-release`。工作流固定使用 Ubuntu 24.04，并使用基于 Node.js 24 的 `checkout@v7`、`setup-java@v6` 和 `upload-artifact@v7`。
 
 ### 本地构建
 
@@ -51,11 +52,11 @@ APK 输出：
 app/build/outputs/apk/release/app-release.apk
 ```
 
-release 构建固定使用仓库中的 `signing/wifi-password-guard.p12`。因此无论在本地还是
+debug 和 release 构建都固定使用仓库中的 `signing/wifi-auth-cleanup.p12`。因此无论在本地还是
 GitHub Actions 构建，APK 签名都保持一致，可以直接覆盖升级。证书 SHA-256：
 
 ```text
-03:3A:6B:A5:75:AD:6A:56:E6:32:08:9A:3A:1F:52:B5:1E:F7:80:B8:2B:5E:EC:33:22:F8:6A:85:FB:40:CA:09
+0D:22:1D:15:FC:FC:54:A6:35:2C:FC:D9:3C:2C:21:AF:9A:90:42:9A:41:25:FB:35:D7:6A:68:AC:A1:42:2E:99
 ```
 
 这个私钥随公开源码提供，只用于保证测试构建签名稳定，不能作为正式发布身份凭据。
@@ -63,8 +64,8 @@ GitHub Actions 构建，APK 签名都保持一致，可以直接覆盖升级。�
 
 ## 安装与使用
 
-1. 安装 APK。若设备上装有 1.0.1 或更早的随机 debug 签名版本，需要先卸载旧版一次；
-   从 1.0.2 开始，后续构建可以直接覆盖升级。
+1. 先禁用并卸载旧包 `io.github.wifipasswordguard`，再安装新包。由于 1.1.0 同时更改了
+   应用包名和签名，Android 会把它视为一个新应用；从 1.1.0 开始的后续构建可以直接覆盖升级。
 2. 在 LSPosed 中启用模块。
 3. 作用域勾选“设置”（`com.android.settings`）。
 4. 强制停止“设置”或重启手机。
@@ -75,7 +76,7 @@ GitHub Actions 构建，APK 签名都保持一致，可以直接覆盖升级。�
 查看日志：
 
 ```bash
-adb logcat -s WifiPasswordGuard
+adb logcat -s WifiAuthCleanup
 ```
 
 也可以在 LSPosed 的日志页面查看模块日志。

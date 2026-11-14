@@ -2,7 +2,7 @@ plugins {
     alias(libs.plugins.agp.app)
 }
 
-val stableSigningFile = rootProject.file("signing/wifi-password-guard.p12")
+val stableSigningFile = rootProject.file("signing/wifi-auth-cleanup.p12")
 val stableSigningPassword = "REDACTED_SIGNING_PASSWORD"
 
 check(stableSigningFile.isFile) {
@@ -10,23 +10,23 @@ check(stableSigningFile.isFile) {
 }
 
 android {
-    namespace = "io.github.wifipasswordguard"
+    namespace = "io.github.aetherpx.wifiauthcleanup"
     compileSdk = 37
     buildToolsVersion = "37.0.0"
 
     defaultConfig {
-        applicationId = "io.github.wifipasswordguard"
+        applicationId = "io.github.aetherpx.wifiauthcleanup"
         minSdk = 26
         targetSdk = 37
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.1.0"
     }
 
     signingConfigs {
         create("stable") {
             storeFile = stableSigningFile
             storePassword = stableSigningPassword
-            keyAlias = "wifi-password-guard"
+            keyAlias = "wifi-auth-cleanup"
             keyPassword = stableSigningPassword
             storeType = "PKCS12"
         }

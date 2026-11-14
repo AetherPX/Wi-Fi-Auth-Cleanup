@@ -1,4 +1,4 @@
-package io.github.wifipasswordguard;
+package io.github.aetherpx.wifiauthcleanup;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -51,9 +51,9 @@ import io.github.libxposed.api.XposedModuleInterface;
  *     This also covers AOSP-style ROMs that do not send the MIUI broadcast.</li>
  * </ol>
  */
-public final class WifiPasswordGuardModule extends XposedModule {
+public final class WifiAuthCleanupModule extends XposedModule {
 
-    private static final String TAG = "WifiPasswordGuard";
+    private static final String TAG = "WifiAuthCleanup";
     private static final String TARGET_PACKAGE = "com.android.settings";
 
     /** MIUI/HyperOS broadcast sent after a connection/auth failure. */
@@ -104,7 +104,7 @@ public final class WifiPasswordGuardModule extends XposedModule {
     private static volatile Method sGetNetworkSelectionDisableReason;
     private static volatile boolean sDisableReasonUnavailable;
 
-    private static volatile WifiPasswordGuardModule sModule;
+    private static volatile WifiAuthCleanupModule sModule;
     private static volatile WifiManager sWifiManager;
     private static volatile Context sContext;
     private static volatile Handler sWorker;
@@ -112,7 +112,7 @@ public final class WifiPasswordGuardModule extends XposedModule {
     private static volatile boolean sSaveHooked;
     private static volatile boolean sReceiverRegistered;
 
-    private static final Runnable POLL_RUNNABLE = WifiPasswordGuardModule::checkAttempts;
+    private static final Runnable POLL_RUNNABLE = WifiAuthCleanupModule::checkAttempts;
 
     private static final BroadcastReceiver RECEIVER = new BroadcastReceiver() {
         @Override
@@ -613,7 +613,7 @@ public final class WifiPasswordGuardModule extends XposedModule {
         }
         synchronized (LOCK) {
             if (sWorker == null) {
-                HandlerThread thread = new HandlerThread("WifiPasswordGuard");
+                HandlerThread thread = new HandlerThread("WifiAuthCleanup");
                 thread.start();
                 sWorker = new Handler(thread.getLooper());
             }
@@ -678,7 +678,7 @@ public final class WifiPasswordGuardModule extends XposedModule {
     }
 
     private static void logInfo(String message) {
-        WifiPasswordGuardModule module = sModule;
+        WifiAuthCleanupModule module = sModule;
         if (module != null) {
             module.log(Log.INFO, TAG, message);
         } else {
@@ -687,7 +687,7 @@ public final class WifiPasswordGuardModule extends XposedModule {
     }
 
     private static void logError(String message, Throwable throwable) {
-        WifiPasswordGuardModule module = sModule;
+        WifiAuthCleanupModule module = sModule;
         if (module != null) {
             module.log(Log.ERROR, TAG, message, throwable);
         } else {

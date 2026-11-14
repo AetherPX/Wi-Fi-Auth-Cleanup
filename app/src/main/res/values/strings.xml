@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">WiFi 密码保护</string>
+    <string name="app_name">Wi-Fi Auth Cleanup</string>
     <string name="module_description">连接 Wi-Fi 时如果密码错误，自动移除刚保存的网络，避免错误密码被系统记住。</string>
 </resources>

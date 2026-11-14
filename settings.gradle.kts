@@ -14,6 +14,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "WifiPasswordGuard"
+rootProject.name = "WifiAuthCleanup"
 
 include(":app")

@@ -1,10 +1,10 @@
 # Stable test signing key
 
-`wifi-password-guard.p12` is intentionally committed so local and GitHub Actions builds produce
+`wifi-auth-cleanup.p12` is intentionally committed so local and GitHub Actions builds produce
 APKs with the same signature. It is a public test key, not a secure release identity.
 
-- Alias: `wifi-password-guard`
-- Certificate SHA-256: `03:3A:6B:A5:75:AD:6A:56:E6:32:08:9A:3A:1F:52:B5:1E:F7:80:B8:2B:5E:EC:33:22:F8:6A:85:FB:40:CA:09`
+- Alias: `wifi-auth-cleanup`
+- Certificate SHA-256: `0D:22:1D:15:FC:FC:54:A6:35:2C:FC:D9:3C:2C:21:AF:9A:90:42:9A:41:25:FB:35:D7:6A:68:AC:A1:42:2E:99`
 
 Replace this key and the corresponding values in `app/build.gradle.kts` before using the project
 for a trusted public release. Keep the replacement key permanently; Android cannot install an
