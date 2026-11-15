@@ -106,6 +106,19 @@ APK 输出位置：
 app/build/outputs/apk/release/app-release.apk
 ```
 
+Release 构建启用了 R8 代码优化、混淆和资源压缩。AGP 9 即使在纯 Java 模块中也会向未压缩构建加入 Kotlin 标准库；R8 会删除这些不可达代码，同时保留 Xposed 入口类。当前环境的实测结果：
+
+| 构建 | APK 大小 | DEX 类数量 |
+| --- | ---: | ---: |
+| 优化前 | 2,088,273 字节 | 1,090 |
+| R8 优化后 | 18,413 字节 | 8 |
+
+体积减少约 **99.1%**。R8 映射文件位于：
+
+```text
+app/build/outputs/mapping/release/mapping.txt
+```
+
 Android 17 SDK 的包名为 `platforms;android-37.0`。如果 AGP 查找的是 `platforms/android-37`，可安装平台后创建兼容链接：
 
 ```bash

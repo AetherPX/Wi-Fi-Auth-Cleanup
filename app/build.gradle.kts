@@ -18,8 +18,8 @@ android {
         applicationId = "io.github.aetherpx.wifiauthcleanup"
         minSdk = 33
         targetSdk = 37
-        versionCode = 7
-        versionName = "1.2.0"
+        versionCode = 8
+        versionName = "1.2.1"
     }
 
     signingConfigs {
@@ -37,6 +37,12 @@ android {
             signingConfig = signingConfigs.getByName("stable")
         }
         release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             signingConfig = signingConfigs.getByName("stable")
         }
     }
