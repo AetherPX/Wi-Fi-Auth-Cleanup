@@ -13,7 +13,6 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.text.TextUtils;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -24,7 +23,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
@@ -71,12 +69,6 @@ public final class WifiAuthCleanupModule extends XposedModule {
     private static final int DISABLED_AUTHENTICATION_FAILURE = 3;
     private static final int DISABLED_BY_WRONG_PASSWORD = 8;
 
-    /**
-     * A wrong password on a network that has connected before is reported with reason 3 rather
-     * than 8. Keep this enabled so editing the password of an existing network is covered too.
-     */
-    private static final boolean REMOVE_ON_GENERIC_AUTH_FAILURE = true;
-
     private static final long ATTEMPT_TIMEOUT_MS = 120_000L;
     private static final long FIRST_POLL_DELAY_MS = 1_500L;
     private static final long POLL_INTERVAL_MS = 1_500L;
@@ -117,9 +109,6 @@ public final class WifiAuthCleanupModule extends XposedModule {
     private static final BroadcastReceiver RECEIVER = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (intent == null) {
-                return;
-            }
             String action = intent.getAction();
             if (ACTION_MIUI_WIFI_CONNECTION_FAILURE.equals(action)) {
                 onMiuiConnectionFailure(intent);
@@ -159,19 +148,16 @@ public final class WifiAuthCleanupModule extends XposedModule {
         }
 
         try {
-            Class<?> wifiManagerClass =
-                    Class.forName("android.net.wifi.WifiManager", false, param.getClassLoader());
             // WifiManager.ActionListener is hidden from the public Android SDK. Resolve it by
             // name so this project can compile against the normal platform android.jar.
             Class<?> actionListenerClass = Class.forName(
                     "android.net.wifi.WifiManager$ActionListener",
                     false,
                     param.getClassLoader());
-            Method connect = wifiManagerClass.getDeclaredMethod(
+            Method connect = WifiManager.class.getDeclaredMethod(
                     "connect", WifiConfiguration.class, actionListenerClass);
 
             hook(connect)
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(chain -> {
                         onConnect(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
                         return chain.proceed();
@@ -184,10 +170,9 @@ public final class WifiAuthCleanupModule extends XposedModule {
             // saves also lets us tell a freshly entered password apart from a plain connect to an
             // already saved network.
             try {
-                Method save = wifiManagerClass.getDeclaredMethod(
+                Method save = WifiManager.class.getDeclaredMethod(
                         "save", WifiConfiguration.class, actionListenerClass);
                 hook(save)
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(chain -> {
                             onSave(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
                             return chain.proceed();
@@ -207,11 +192,11 @@ public final class WifiAuthCleanupModule extends XposedModule {
     // ---------------------------------------------------------------------------------------
 
     private static void onSave(Object thisObject, WifiConfiguration config) {
-        if (!(thisObject instanceof WifiManager) || config == null) {
+        if (config == null) {
             return;
         }
         String ssid = normalizeSsid(config.SSID);
-        if (!isUsableSsid(ssid) || !hasCredential(config)) {
+        if (!isUsableSsid(ssid)) {
             return;
         }
 
@@ -226,18 +211,17 @@ public final class WifiAuthCleanupModule extends XposedModule {
     }
 
     private static void onConnect(Object thisObject, WifiConfiguration config) {
-        if (!(thisObject instanceof WifiManager) || config == null) {
+        if (config == null) {
             return;
         }
         String ssid = normalizeSsid(config.SSID);
-        if (!isUsableSsid(ssid) || !hasCredential(config)) {
-            // Open networks do not have a password to protect.
+        if (!isUsableSsid(ssid)) {
             return;
         }
 
         // A save() immediately followed by connect() means the user just submitted credentials.
-        // If save() could not be hooked, fall back to tracking every connect() with credentials.
-        if (config.networkId != -1 && sSaveHooked && !wasRecentlySaved(ssid)) {
+        // If save() could not be hooked, fall back to tracking every Settings connect call.
+        if (config.networkId != -1 && sSaveHooked && !consumeRecentSave(ssid)) {
             logInfo("Ignoring connect() to already saved network \"" + ssid + "\"");
             return;
         }
@@ -258,7 +242,7 @@ public final class WifiAuthCleanupModule extends XposedModule {
     }
 
     private static boolean isUsableSsid(String ssid) {
-        return !TextUtils.isEmpty(ssid) && !"<unknown ssid>".equalsIgnoreCase(ssid);
+        return ssid != null && !ssid.isEmpty() && !"<unknown ssid>".equalsIgnoreCase(ssid);
     }
 
     private static void rememberSave(String ssid) {
@@ -268,8 +252,8 @@ public final class WifiAuthCleanupModule extends XposedModule {
         RECENT_SAVES.put(ssid, now);
     }
 
-    private static boolean wasRecentlySaved(String ssid) {
-        Long savedAt = RECENT_SAVES.get(ssid);
+    private static boolean consumeRecentSave(String ssid) {
+        Long savedAt = RECENT_SAVES.remove(ssid);
         return savedAt != null && SystemClock.elapsedRealtime() - savedAt <= RECENT_SAVE_WINDOW_MS;
     }
 
@@ -282,38 +266,34 @@ public final class WifiAuthCleanupModule extends XposedModule {
             // Secondary/slave Wi-Fi connections are not initiated through WifiManager.connect().
             return;
         }
+        if (ATTEMPTS.isEmpty()) {
+            return;
+        }
         WifiConfiguration failedConfig = intent.getParcelableExtra(EXTRA_WIFI_CONFIGURATION);
         if (failedConfig == null) {
+            Attempt failed = findAttempt(null);
+            if (failed != null) {
+                failed.authFailureSeen = true;
+            }
             schedulePoll(0L);
             return;
         }
 
         String ssid = normalizeSsid(failedConfig.SSID);
-        if (TextUtils.isEmpty(ssid) || !ATTEMPTS.containsKey(ssid)) {
+        Attempt attempt = isUsableSsid(ssid) ? ATTEMPTS.get(ssid) : null;
+        if (attempt == null) {
             // Not a connection attempt started by the Settings UI.
             return;
         }
+        attempt.authFailureSeen = true;
 
         WifiManager wifiManager = sWifiManager;
-        if (wifiManager == null) {
-            return;
-        }
-
-        boolean removed = false;
-        if (failedConfig.networkId >= 0) {
-            removed = removeNetwork(wifiManager, failedConfig, "MIUI broadcast");
-        }
-
-        if (!removed) {
-            removed = removeMatchingNetworks(wifiManager, ssid, failedConfig.networkId);
-        }
-
-        if (removed) {
-            if (ATTEMPTS.remove(ssid) != null) {
+        if (failedConfig.networkId >= 0
+                && removeNetwork(wifiManager, failedConfig, "MIUI broadcast")) {
+            if (ATTEMPTS.remove(ssid, attempt)) {
                 showRemovedToast(ssid);
             }
         } else {
-            // The framework may not have written the disabled status yet; let the poller retry.
             logInfo("Could not remove \"" + ssid + "\" from the MIUI broadcast, polling");
             schedulePoll(0L);
         }
@@ -324,9 +304,6 @@ public final class WifiAuthCleanupModule extends XposedModule {
             return;
         }
         WifiManager wifiManager = sWifiManager;
-        if (wifiManager == null) {
-            return;
-        }
 
         List<WifiConfiguration> configured = null;
         try {
@@ -336,8 +313,6 @@ public final class WifiAuthCleanupModule extends XposedModule {
         }
 
         long now = SystemClock.elapsedRealtime();
-        boolean keepPolling = false;
-
         Iterator<Map.Entry<String, Attempt>> iterator = ATTEMPTS.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, Attempt> entry = iterator.next();
@@ -349,12 +324,10 @@ public final class WifiAuthCleanupModule extends XposedModule {
                 continue;
             }
 
-            if (configured == null || configured.isEmpty()) {
-                keepPolling = true;
+            if (configured == null) {
                 continue;
             }
 
-            boolean handled = false;
             boolean removed = false;
             boolean found = false;
             for (WifiConfiguration config : configured) {
@@ -362,12 +335,10 @@ public final class WifiAuthCleanupModule extends XposedModule {
                     continue;
                 }
                 found = true;
-                int reason = getDisableReason(config);
+                int reason = attempt.authFailureSeen ? -1 : getDisableReason(config);
                 if (attempt.authFailureSeen
                         || reason == DISABLED_BY_WRONG_PASSWORD
-                        || (REMOVE_ON_GENERIC_AUTH_FAILURE
-                        && reason == DISABLED_AUTHENTICATION_FAILURE)) {
-                    handled = true;
+                        || reason == DISABLED_AUTHENTICATION_FAILURE) {
                     logInfo("Authentication failure for \"" + attempt.ssid
                             + "\" (supplicant=" + attempt.authFailureSeen
                             + ", reason=" + reason + ", netId=" + config.networkId + ")");
@@ -384,48 +355,21 @@ public final class WifiAuthCleanupModule extends XposedModule {
             } else if (removed) {
                 iterator.remove();
                 showRemovedToast(attempt.ssid);
-            } else if (handled) {
-                // The framework can briefly reject removeNetwork() while it is still finishing
-                // the failed connection. Keep retrying until the attempt timeout instead of
-                // abandoning the network after the first false return value.
-                keepPolling = true;
-                logInfo("Network \"" + attempt.ssid
-                        + "\" reported an auth failure; removal will be retried");
-            } else {
-                keepPolling = true;
             }
         }
 
-        if (!ATTEMPTS.isEmpty() && keepPolling) {
+        if (!ATTEMPTS.isEmpty()) {
             schedulePoll(POLL_INTERVAL_MS);
         }
     }
 
     private static void onSupplicantAuthFailure() {
         if (ATTEMPTS.isEmpty()) {
-            logInfo("Supplicant reported an authentication failure with no active attempt");
             return;
         }
 
-        String currentSsid = null;
-        WifiManager wifiManager = sWifiManager;
-        if (wifiManager != null) {
-            try {
-                WifiInfo info = wifiManager.getConnectionInfo();
-                if (info != null) {
-                    currentSsid = normalizeSsid(info.getSSID());
-                }
-            } catch (Throwable t) {
-                logError("getConnectionInfo failed after authentication failure", t);
-            }
-        }
-
-        Attempt failed = isUsableSsid(currentSsid) ? ATTEMPTS.get(currentSsid) : null;
-        if (failed == null && !isUsableSsid(currentSsid) && ATTEMPTS.size() == 1) {
-            // Some ROMs clear WifiInfo before delivering ERROR_AUTHENTICATING. There can only be
-            // one foreground Settings connection at a time, so the sole active attempt is safe.
-            failed = ATTEMPTS.values().iterator().next();
-        }
+        String currentSsid = getCurrentSsid();
+        Attempt failed = findAttempt(currentSsid);
 
         if (failed != null) {
             failed.authFailureSeen = true;
@@ -441,62 +385,39 @@ public final class WifiAuthCleanupModule extends XposedModule {
         if (ATTEMPTS.isEmpty()) {
             return;
         }
-        WifiManager wifiManager = sWifiManager;
-        if (wifiManager == null) {
+        String connectedSsid = getCurrentSsid();
+        if (!isUsableSsid(connectedSsid)) {
             return;
         }
-
-        try {
-            WifiInfo info = wifiManager.getConnectionInfo();
-            String connectedSsid = info == null ? null : normalizeSsid(info.getSSID());
-            if (!isUsableSsid(connectedSsid)) {
-                logInfo("CONNECTED event had no usable SSID; keeping attempts active");
-                return;
-            }
-
-            Attempt completed = ATTEMPTS.remove(connectedSsid);
-            if (completed != null) {
-                logInfo("Connection to \"" + connectedSsid
-                        + "\" reached NetworkInfo.CONNECTED");
-            }
-        } catch (Throwable t) {
-            logError("Could not process CONNECTED event", t);
+        if (ATTEMPTS.remove(connectedSsid) != null) {
+            logInfo("Connection to \"" + connectedSsid
+                    + "\" reached NetworkInfo.CONNECTED");
         }
     }
 
-    private static boolean removeMatchingNetworks(WifiManager wifiManager, String ssid, int netId) {
-        boolean removed = false;
-        List<WifiConfiguration> configured;
+    private static Attempt findAttempt(String ssid) {
+        if (isUsableSsid(ssid)) {
+            return ATTEMPTS.get(ssid);
+        }
+        // Some ROMs clear WifiInfo before reporting the authentication error. Settings can only
+        // have one foreground connection in progress, so the sole active attempt is unambiguous.
+        return ATTEMPTS.size() == 1 ? ATTEMPTS.values().iterator().next() : null;
+    }
+
+    private static String getCurrentSsid() {
         try {
-            configured = wifiManager.getConfiguredNetworks();
+            WifiInfo info = sWifiManager.getConnectionInfo();
+            return info == null ? null : normalizeSsid(info.getSSID());
         } catch (Throwable t) {
-            logError("getConfiguredNetworks failed while removing", t);
-            return false;
+            logError("getConnectionInfo failed", t);
+            return null;
         }
-        if (configured == null) {
-            return false;
-        }
-        for (WifiConfiguration config : configured) {
-            if (!ssidEquals(config.SSID, ssid)) {
-                continue;
-            }
-            int reason = getDisableReason(config);
-            if (config.networkId == netId
-                    || reason == DISABLED_BY_WRONG_PASSWORD
-                    || (REMOVE_ON_GENERIC_AUTH_FAILURE
-                    && reason == DISABLED_AUTHENTICATION_FAILURE)) {
-                if (removeNetwork(wifiManager, config, "fallback")) {
-                    removed = true;
-                }
-            }
-        }
-        return removed;
     }
 
     private static boolean removeNetwork(WifiManager wifiManager,
                                          WifiConfiguration config,
                                          String source) {
-        if (config == null || config.networkId < 0) {
+        if (config.networkId < 0) {
             return false;
         }
         try {
@@ -599,11 +520,8 @@ public final class WifiAuthCleanupModule extends XposedModule {
 
     private static void schedulePoll(long delayMs) {
         Handler worker = ensureWorker();
-        if (worker == null) {
-            return;
-        }
         worker.removeCallbacks(POLL_RUNNABLE);
-        worker.postDelayed(POLL_RUNNABLE, Math.max(0L, delayMs));
+        worker.postDelayed(POLL_RUNNABLE, delayMs);
     }
 
     private static Handler ensureWorker() {
@@ -646,20 +564,6 @@ public final class WifiAuthCleanupModule extends XposedModule {
         return null;
     }
 
-    private static boolean hasCredential(WifiConfiguration config) {
-        if (!TextUtils.isEmpty(config.preSharedKey)) {
-            return true;
-        }
-        if (config.wepKeys != null) {
-            for (String key : config.wepKeys) {
-                if (!TextUtils.isEmpty(key)) {
-                    return true;
-                }
-            }
-        }
-        return config.enterpriseConfig != null;
-    }
-
     private static String normalizeSsid(String ssid) {
         if (ssid == null) {
             return null;
@@ -672,27 +576,15 @@ public final class WifiAuthCleanupModule extends XposedModule {
     }
 
     private static boolean ssidEquals(String left, String right) {
-        String normalizedLeft = normalizeSsid(left);
-        String normalizedRight = normalizeSsid(right);
-        return normalizedLeft != null && normalizedLeft.equals(normalizedRight);
+        return right != null && right.equals(normalizeSsid(left));
     }
 
     private static void logInfo(String message) {
-        WifiAuthCleanupModule module = sModule;
-        if (module != null) {
-            module.log(Log.INFO, TAG, message);
-        } else {
-            Log.i(TAG, message);
-        }
+        sModule.log(Log.INFO, TAG, message);
     }
 
     private static void logError(String message, Throwable throwable) {
-        WifiAuthCleanupModule module = sModule;
-        if (module != null) {
-            module.log(Log.ERROR, TAG, message, throwable);
-        } else {
-            Log.e(TAG, message, throwable);
-        }
+        sModule.log(Log.ERROR, TAG, message, throwable);
     }
 
     private static final class Attempt {

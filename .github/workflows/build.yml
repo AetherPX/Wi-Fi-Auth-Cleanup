@@ -19,13 +19,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # Uploading a folder through GitHub's web UI does not remove old repository files. Clean
-      # sources from the former package name so only the renamed module is compiled.
-      - name: Remove obsolete pre-rename sources
-        run: |
-          rm -rf app/src/main/java/io/github/wifipasswordguard
-          rm -f app/src/main/res/layout/activity_main.xml
-
       - name: Set up JDK 21
         uses: actions/setup-java@v6
         with:
@@ -44,14 +37,12 @@ jobs:
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           sdkmanager --sdk_root="$SDK_ROOT" \
-            "platform-tools" \
             "platforms;android-37.0" \
             "build-tools;37.0.0"
           if [ -d "$SDK_ROOT/platforms/android-37.0" ] \
               && [ ! -e "$SDK_ROOT/platforms/android-37" ]; then
             ln -sfn "android-37.0" "$SDK_ROOT/platforms/android-37"
           fi
-          ls -l "$SDK_ROOT/platforms"
 
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew

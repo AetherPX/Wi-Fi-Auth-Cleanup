@@ -18,8 +18,8 @@ android {
         applicationId = "io.github.aetherpx.wifiauthcleanup"
         minSdk = 26
         targetSdk = 37
-        versionCode = 4
-        versionName = "1.1.0"
+        versionCode = 5
+        versionName = "1.1.1"
     }
 
     signingConfigs {
@@ -37,9 +37,6 @@ android {
             signingConfig = signingConfigs.getByName("stable")
         }
         release {
-            isMinifyEnabled = false
-            isShrinkResources = false
-            proguardFiles("proguard-rules.pro")
             signingConfig = signingConfigs.getByName("stable")
         }
     }
@@ -54,11 +51,6 @@ android {
             merges += "META-INF/xposed/*"
             excludes += "**"
         }
-    }
-
-    lint {
-        abortOnError = false
-        checkReleaseBuilds = false
     }
 }
 

@@ -3,8 +3,6 @@
 
     <!-- Pure LSPosed module: intentionally no Activity or launcher entry. -->
     <application
-        android:allowBackup="false"
         android:description="@string/module_description"
-        android:label="@string/app_name"
-        android:supportsRtl="true" />
+        android:label="@string/app_name" />
 </manifest>
