@@ -8,7 +8,6 @@ import android.net.NetworkInfo;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
-import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -18,7 +17,6 @@ import android.widget.Toast;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,103 +24,58 @@ import java.util.concurrent.ConcurrentHashMap;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
-/**
- * Prevents Settings from keeping a Wi-Fi network whose password was entered incorrectly.
- *
- * <p>Android's {@code WifiManager.connect(WifiConfiguration, ...)} and {@code save(...)} persist the
- * supplied configuration before the authentication attempt is made.  When the password is wrong
- * the network therefore remains in the saved-network list.  This module hooks both methods,
- * remembers the configuration the user just submitted, and removes the network as soon as the
- * framework reports an authentication failure.</p>
- *
- * <p>Three complementary failure signals are used:</p>
- * <ol>
- *     <li>The MIUI/HyperOS {@code miui.intent.action.WIFI_CONNECTION_FAILURE} broadcast.  It
- *     carries the failed {@link WifiConfiguration}, which lets us remove exactly the network that
- *     was just tried.</li>
- *     <li>{@code SUPPLICANT_STATE_CHANGED_ACTION} with {@code ERROR_AUTHENTICATING}.  This is an
- *     explicit authentication failure and does not depend on the framework updating its hidden
- *     network-selection status first.</li>
- *     <li>Polling the configured networks and checking their
- *     {@code NetworkSelectionStatus}.  A network disabled with
- *     {@code DISABLED_AUTHENTICATION_FAILURE} or {@code DISABLED_BY_WRONG_PASSWORD} is removed.
- *     This also covers AOSP-style ROMs that do not send the MIUI broadcast.</li>
- * </ol>
- */
+/** Removes a network saved by HyperOS Settings after Wi-Fi authentication fails. */
 public final class WifiAuthCleanupModule extends XposedModule {
 
     private static final String TAG = "WifiAuthCleanup";
     private static final String TARGET_PACKAGE = "com.android.settings";
+    private static final String HYPER_OS_VERSION_PROPERTY = "ro.mi.os.version.name";
 
-    /** MIUI/HyperOS broadcast sent after a connection/auth failure. */
-    private static final String ACTION_MIUI_WIFI_CONNECTION_FAILURE =
+    private static final String ACTION_WIFI_CONNECTION_FAILURE =
             "miui.intent.action.WIFI_CONNECTION_FAILURE";
     private static final String EXTRA_WIFI_CONFIGURATION = "wifiConfiguration";
     private static final String EXTRA_IS_SLAVE = "isSlave";
 
-    /**
-     * {@code NetworkSelectionStatus} reasons that indicate an authentication failure.  Value 3 is
-     * DISABLED_AUTHENTICATION_FAILURE, value 8 is DISABLED_BY_WRONG_PASSWORD.  They are kept as
-     * literals because the constants are hidden API; they are stable in AOSP and are also used by
-     * the decompiled Settings code.
-     */
-    private static final int DISABLED_AUTHENTICATION_FAILURE = 3;
-    private static final int DISABLED_BY_WRONG_PASSWORD = 8;
-
     private static final long ATTEMPT_TIMEOUT_MS = 120_000L;
-    private static final long FIRST_POLL_DELAY_MS = 1_500L;
-    private static final long POLL_INTERVAL_MS = 1_500L;
-    private static final long NO_CONFIG_GRACE_MS = 10_000L;
-    /**
-     * How long a {@code WifiManager.save()} call marks a configuration as "just submitted by the
-     * Settings UI".  The dialog always calls {@code save()} immediately before {@code connect()},
-     * so this window only has to absorb a few milliseconds of scheduling latency.
-     */
+    private static final long REMOVAL_RETRY_MS = 1_500L;
+    private static final long MISSING_CONFIG_GRACE_MS = 10_000L;
     private static final long RECENT_SAVE_WINDOW_MS = 15_000L;
 
-    private static final String TOAST_TEXT = "Wi-Fi 密码错误，已取消保存该网络";
+    private static final String TOAST_TEXT = "Wi-Fi 密码验证失败，已取消保存该网络";
 
     private static final Map<String, Attempt> ATTEMPTS = new ConcurrentHashMap<>();
     private static final Map<String, Long> RECENT_SAVES = new ConcurrentHashMap<>();
     private static final Object LOCK = new Object();
 
-    /**
-     * {@code WifiConfiguration#getNetworkSelectionStatus()} and
-     * {@code NetworkSelectionStatus#getNetworkSelectionDisableReason()} are {@code @SystemApi}
-     * hidden API, so they are not part of the public {@code android.jar} and are resolved
-     * reflectively at runtime.
-     */
-    private static volatile Method sGetNetworkSelectionStatus;
-    private static volatile Method sGetNetworkSelectionDisableReason;
-    private static volatile boolean sDisableReasonUnavailable;
-
     private static volatile WifiAuthCleanupModule sModule;
     private static volatile WifiManager sWifiManager;
     private static volatile Context sContext;
     private static volatile Handler sWorker;
+    private static volatile String sHyperOsVersion;
     private static volatile boolean sHooked;
-    private static volatile boolean sSaveHooked;
     private static volatile boolean sReceiverRegistered;
 
-    private static final Runnable POLL_RUNNABLE = WifiAuthCleanupModule::checkAttempts;
+    private static final Runnable REMOVE_FAILED_RUNNABLE =
+            WifiAuthCleanupModule::removeFailedAttempts;
 
     private static final BroadcastReceiver RECEIVER = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             String action = intent.getAction();
-            if (ACTION_MIUI_WIFI_CONNECTION_FAILURE.equals(action)) {
-                onMiuiConnectionFailure(intent);
-            } else if (WifiManager.SUPPLICANT_STATE_CHANGED_ACTION.equals(action)) {
+            if (ACTION_WIFI_CONNECTION_FAILURE.equals(action)) {
+                onHyperOsConnectionFailure(intent);
+                return;
+            }
+            if (WifiManager.SUPPLICANT_STATE_CHANGED_ACTION.equals(action)) {
                 int error = intent.getIntExtra(WifiManager.EXTRA_SUPPLICANT_ERROR, -1);
                 if (error == WifiManager.ERROR_AUTHENTICATING) {
                     onSupplicantAuthFailure();
                 }
-            } else if (WifiManager.NETWORK_STATE_CHANGED_ACTION.equals(action)) {
+                return;
+            }
+            if (WifiManager.NETWORK_STATE_CHANGED_ACTION.equals(action)) {
                 NetworkInfo info = intent.getParcelableExtra(WifiManager.EXTRA_NETWORK_INFO);
                 if (info != null && info.isConnected()) {
-                    // WifiInfo exposes the target SSID as soon as association starts, before the
-                    // password has actually been accepted. Only a CONNECTED NetworkInfo event is
-                    // reliable enough to mark an attempt successful.
                     onNetworkConnected();
                 }
             }
@@ -132,12 +85,21 @@ public final class WifiAuthCleanupModule extends XposedModule {
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
         sModule = this;
-        logInfo("Loaded into " + param.getProcessName() + " (API " + getApiVersion() + ")");
+        if (!TARGET_PACKAGE.equals(param.getProcessName())) {
+            return;
+        }
+        sHyperOsVersion = readSystemProperty(HYPER_OS_VERSION_PROPERTY);
+        if (isHyperOs()) {
+            logInfo("Loaded into " + param.getProcessName() + " on HyperOS " + sHyperOsVersion
+                    + " (Xposed API " + getApiVersion() + ")");
+        } else {
+            logInfo("HyperOS not detected; module disabled in " + param.getProcessName());
+        }
     }
 
     @Override
     public void onPackageReady(XposedModuleInterface.PackageReadyParam param) {
-        if (!TARGET_PACKAGE.equals(param.getPackageName())) {
+        if (!isHyperOs() || !TARGET_PACKAGE.equals(param.getPackageName())) {
             return;
         }
         synchronized (LOCK) {
@@ -148,48 +110,30 @@ public final class WifiAuthCleanupModule extends XposedModule {
         }
 
         try {
-            // WifiManager.ActionListener is hidden from the public Android SDK. Resolve it by
-            // name so this project can compile against the normal platform android.jar.
             Class<?> actionListenerClass = Class.forName(
                     "android.net.wifi.WifiManager$ActionListener",
                     false,
                     param.getClassLoader());
+            Method save = WifiManager.class.getDeclaredMethod(
+                    "save", WifiConfiguration.class, actionListenerClass);
             Method connect = WifiManager.class.getDeclaredMethod(
                     "connect", WifiConfiguration.class, actionListenerClass);
 
-            hook(connect)
-                    .intercept(chain -> {
-                        onConnect(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
-                        return chain.proceed();
-                    });
+            hook(save).intercept(chain -> {
+                onSave(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
+                return chain.proceed();
+            });
+            logInfo("Hooked WifiManager.save(WifiConfiguration, ActionListener)");
 
+            hook(connect).intercept(chain -> {
+                onConnect(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
+                return chain.proceed();
+            });
             logInfo("Hooked WifiManager.connect(WifiConfiguration, ActionListener)");
-
-            // save() is hooked as well: the Settings dialog calls save() right before connect(),
-            // and some "add network" flows only save and let the framework auto-join.  Tracking
-            // saves also lets us tell a freshly entered password apart from a plain connect to an
-            // already saved network.
-            try {
-                Method save = WifiManager.class.getDeclaredMethod(
-                        "save", WifiConfiguration.class, actionListenerClass);
-                hook(save)
-                        .intercept(chain -> {
-                            onSave(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
-                            return chain.proceed();
-                        });
-                sSaveHooked = true;
-                logInfo("Hooked WifiManager.save(WifiConfiguration, ActionListener)");
-            } catch (Throwable t) {
-                logError("Failed to hook WifiManager.save", t);
-            }
         } catch (Throwable t) {
             logError("Failed to install hooks", t);
         }
     }
-
-    // ---------------------------------------------------------------------------------------
-    // Hooks
-    // ---------------------------------------------------------------------------------------
 
     private static void onSave(Object thisObject, WifiConfiguration config) {
         if (config == null) {
@@ -200,13 +144,9 @@ public final class WifiAuthCleanupModule extends XposedModule {
             return;
         }
 
-        WifiManager wifiManager = (WifiManager) thisObject;
         rememberSave(ssid);
-
-        if (config.networkId == -1) {
-            // Brand new network: not every Settings flow calls connect() after save(), so start
-            // monitoring from the save itself.
-            trackAttempt(wifiManager, ssid, "save");
+        if (config.networkId < 0) {
+            trackAttempt((WifiManager) thisObject, ssid, "save");
         }
     }
 
@@ -219,13 +159,10 @@ public final class WifiAuthCleanupModule extends XposedModule {
             return;
         }
 
-        // A save() immediately followed by connect() means the user just submitted credentials.
-        // If save() could not be hooked, fall back to tracking every Settings connect call.
-        if (config.networkId != -1 && sSaveHooked && !consumeRecentSave(ssid)) {
-            logInfo("Ignoring connect() to already saved network \"" + ssid + "\"");
+        boolean recentlySaved = consumeRecentSave(ssid);
+        if (config.networkId >= 0 && !recentlySaved) {
             return;
         }
-
         trackAttempt((WifiManager) thisObject, ssid, "connect");
     }
 
@@ -236,13 +173,16 @@ public final class WifiAuthCleanupModule extends XposedModule {
         }
         registerReceiverIfPossible();
 
-        ATTEMPTS.put(ssid, new Attempt(ssid));
+        Attempt attempt = new Attempt(ssid);
+        ATTEMPTS.put(ssid, attempt);
+        ensureWorker().postDelayed(() -> expireAttempt(ssid, attempt), ATTEMPT_TIMEOUT_MS);
         logInfo("Monitoring connection attempt for \"" + ssid + "\" (via " + source + ")");
-        schedulePoll(FIRST_POLL_DELAY_MS);
     }
 
-    private static boolean isUsableSsid(String ssid) {
-        return ssid != null && !ssid.isEmpty() && !"<unknown ssid>".equalsIgnoreCase(ssid);
+    private static void expireAttempt(String ssid, Attempt attempt) {
+        if (ATTEMPTS.remove(ssid, attempt)) {
+            logInfo("Stopped monitoring \"" + ssid + "\" (timeout)");
+        }
     }
 
     private static void rememberSave(String ssid) {
@@ -257,110 +197,36 @@ public final class WifiAuthCleanupModule extends XposedModule {
         return savedAt != null && SystemClock.elapsedRealtime() - savedAt <= RECENT_SAVE_WINDOW_MS;
     }
 
-    // ---------------------------------------------------------------------------------------
-    // Failure handling
-    // ---------------------------------------------------------------------------------------
+    private static void onHyperOsConnectionFailure(Intent intent) {
+        if (ATTEMPTS.isEmpty() || intent.getBooleanExtra(EXTRA_IS_SLAVE, false)) {
+            return;
+        }
 
-    private static void onMiuiConnectionFailure(Intent intent) {
-        if (intent.getBooleanExtra(EXTRA_IS_SLAVE, false)) {
-            // Secondary/slave Wi-Fi connections are not initiated through WifiManager.connect().
-            return;
-        }
-        if (ATTEMPTS.isEmpty()) {
-            return;
-        }
         WifiConfiguration failedConfig = intent.getParcelableExtra(EXTRA_WIFI_CONFIGURATION);
         if (failedConfig == null) {
-            Attempt failed = findAttempt(null);
-            if (failed != null) {
-                failed.authFailureSeen = true;
+            Attempt attempt = findAttempt(null);
+            if (attempt != null) {
+                markAuthenticationFailure(attempt);
+                scheduleRemoval(0L);
             }
-            schedulePoll(0L);
             return;
         }
 
         String ssid = normalizeSsid(failedConfig.SSID);
         Attempt attempt = isUsableSsid(ssid) ? ATTEMPTS.get(ssid) : null;
         if (attempt == null) {
-            // Not a connection attempt started by the Settings UI.
             return;
         }
-        attempt.authFailureSeen = true;
+        markAuthenticationFailure(attempt);
 
-        WifiManager wifiManager = sWifiManager;
         if (failedConfig.networkId >= 0
-                && removeNetwork(wifiManager, failedConfig, "MIUI broadcast")) {
+                && removeNetwork(failedConfig, "HyperOS broadcast")) {
             if (ATTEMPTS.remove(ssid, attempt)) {
                 showRemovedToast(ssid);
             }
-        } else {
-            logInfo("Could not remove \"" + ssid + "\" from the MIUI broadcast, polling");
-            schedulePoll(0L);
-        }
-    }
-
-    private static void checkAttempts() {
-        if (ATTEMPTS.isEmpty()) {
             return;
         }
-        WifiManager wifiManager = sWifiManager;
-
-        List<WifiConfiguration> configured = null;
-        try {
-            configured = wifiManager.getConfiguredNetworks();
-        } catch (Throwable t) {
-            logError("getConfiguredNetworks failed", t);
-        }
-
-        long now = SystemClock.elapsedRealtime();
-        Iterator<Map.Entry<String, Attempt>> iterator = ATTEMPTS.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<String, Attempt> entry = iterator.next();
-            Attempt attempt = entry.getValue();
-
-            if (now - attempt.startedAt > ATTEMPT_TIMEOUT_MS) {
-                iterator.remove();
-                logInfo("Stopped monitoring \"" + attempt.ssid + "\" (timeout)");
-                continue;
-            }
-
-            if (configured == null) {
-                continue;
-            }
-
-            boolean removed = false;
-            boolean found = false;
-            for (WifiConfiguration config : configured) {
-                if (!ssidEquals(config.SSID, attempt.ssid)) {
-                    continue;
-                }
-                found = true;
-                int reason = attempt.authFailureSeen ? -1 : getDisableReason(config);
-                if (attempt.authFailureSeen
-                        || reason == DISABLED_BY_WRONG_PASSWORD
-                        || reason == DISABLED_AUTHENTICATION_FAILURE) {
-                    logInfo("Authentication failure for \"" + attempt.ssid
-                            + "\" (supplicant=" + attempt.authFailureSeen
-                            + ", reason=" + reason + ", netId=" + config.networkId + ")");
-                    if (removeNetwork(wifiManager, config, "poll")) {
-                        removed = true;
-                    }
-                }
-            }
-
-            if (!found && now - attempt.startedAt > NO_CONFIG_GRACE_MS) {
-                // The network is no longer saved, e.g. it was already removed by another path.
-                iterator.remove();
-                logInfo("Network \"" + attempt.ssid + "\" is no longer configured");
-            } else if (removed) {
-                iterator.remove();
-                showRemovedToast(attempt.ssid);
-            }
-        }
-
-        if (!ATTEMPTS.isEmpty()) {
-            schedulePoll(POLL_INTERVAL_MS);
-        }
+        scheduleRemoval(0L);
     }
 
     private static void onSupplicantAuthFailure() {
@@ -369,29 +235,101 @@ public final class WifiAuthCleanupModule extends XposedModule {
         }
 
         String currentSsid = getCurrentSsid();
-        Attempt failed = findAttempt(currentSsid);
-
-        if (failed != null) {
-            failed.authFailureSeen = true;
-            logInfo("Supplicant authentication failure matched \"" + failed.ssid + "\"");
-        } else {
-            logInfo("Supplicant authentication failure did not match an active attempt"
+        Attempt attempt = findAttempt(currentSsid);
+        if (attempt == null) {
+            logInfo("Authentication failure did not match an active attempt"
                     + (currentSsid == null ? "" : " (SSID=\"" + currentSsid + "\")"));
+            return;
         }
-        schedulePoll(0L);
+
+        markAuthenticationFailure(attempt);
+        logInfo("Supplicant authentication failure matched \"" + attempt.ssid + "\"");
+        scheduleRemoval(0L);
     }
 
     private static void onNetworkConnected() {
         if (ATTEMPTS.isEmpty()) {
             return;
         }
-        String connectedSsid = getCurrentSsid();
-        if (!isUsableSsid(connectedSsid)) {
+        String ssid = getCurrentSsid();
+        if (isUsableSsid(ssid) && ATTEMPTS.remove(ssid) != null) {
+            logInfo("Connection to \"" + ssid + "\" reached NetworkInfo.CONNECTED");
+        }
+    }
+
+    private static void markAuthenticationFailure(Attempt attempt) {
+        if (!attempt.authenticationFailed) {
+            attempt.failureAt = SystemClock.elapsedRealtime();
+            attempt.authenticationFailed = true;
+        }
+    }
+
+    private static void removeFailedAttempts() {
+        if (ATTEMPTS.isEmpty()) {
             return;
         }
-        if (ATTEMPTS.remove(connectedSsid) != null) {
-            logInfo("Connection to \"" + connectedSsid
-                    + "\" reached NetworkInfo.CONNECTED");
+
+        List<WifiConfiguration> configured;
+        try {
+            configured = sWifiManager.getConfiguredNetworks();
+        } catch (Throwable t) {
+            logError("getConfiguredNetworks failed", t);
+            scheduleRemoval(REMOVAL_RETRY_MS);
+            return;
+        }
+        if (configured == null) {
+            scheduleRemoval(REMOVAL_RETRY_MS);
+            return;
+        }
+
+        long now = SystemClock.elapsedRealtime();
+        boolean retry = false;
+        for (Attempt attempt : ATTEMPTS.values()) {
+            if (!attempt.authenticationFailed) {
+                continue;
+            }
+
+            boolean found = false;
+            boolean removed = false;
+            for (WifiConfiguration config : configured) {
+                if (!ssidEquals(config.SSID, attempt.ssid)) {
+                    continue;
+                }
+                found = true;
+                if (removeNetwork(config, "authentication failure")) {
+                    removed = true;
+                }
+            }
+
+            if (removed) {
+                if (ATTEMPTS.remove(attempt.ssid, attempt)) {
+                    showRemovedToast(attempt.ssid);
+                }
+            } else if (!found && now - attempt.failureAt >= MISSING_CONFIG_GRACE_MS) {
+                if (ATTEMPTS.remove(attempt.ssid, attempt)) {
+                    logInfo("Network \"" + attempt.ssid + "\" is no longer configured");
+                }
+            } else {
+                retry = true;
+            }
+        }
+
+        if (retry) {
+            scheduleRemoval(REMOVAL_RETRY_MS);
+        }
+    }
+
+    private static boolean removeNetwork(WifiConfiguration config, String source) {
+        if (config.networkId < 0) {
+            return false;
+        }
+        try {
+            boolean removed = sWifiManager.removeNetwork(config.networkId);
+            logInfo("removeNetwork(" + config.networkId + ") via " + source + " -> " + removed);
+            return removed;
+        } catch (Throwable t) {
+            logError("removeNetwork(" + config.networkId + ") failed", t);
+            return false;
         }
     }
 
@@ -399,8 +337,6 @@ public final class WifiAuthCleanupModule extends XposedModule {
         if (isUsableSsid(ssid)) {
             return ATTEMPTS.get(ssid);
         }
-        // Some ROMs clear WifiInfo before reporting the authentication error. Settings can only
-        // have one foreground connection in progress, so the sole active attempt is unambiguous.
         return ATTEMPTS.size() == 1 ? ATTEMPTS.values().iterator().next() : null;
     }
 
@@ -411,59 +347,6 @@ public final class WifiAuthCleanupModule extends XposedModule {
         } catch (Throwable t) {
             logError("getConnectionInfo failed", t);
             return null;
-        }
-    }
-
-    private static boolean removeNetwork(WifiManager wifiManager,
-                                         WifiConfiguration config,
-                                         String source) {
-        if (config.networkId < 0) {
-            return false;
-        }
-        try {
-            boolean removed = wifiManager.removeNetwork(config.networkId);
-            logInfo("removeNetwork(" + config.networkId + ") via " + source + " -> " + removed);
-            return removed;
-        } catch (Throwable t) {
-            logError("removeNetwork(" + config.networkId + ") failed", t);
-            return false;
-        }
-    }
-
-    private static int getDisableReason(WifiConfiguration config) {
-        if (sDisableReasonUnavailable) {
-            return -1;
-        }
-        try {
-            Method getStatus = sGetNetworkSelectionStatus;
-            if (getStatus == null) {
-                getStatus = WifiConfiguration.class.getDeclaredMethod("getNetworkSelectionStatus");
-                getStatus.setAccessible(true);
-                sGetNetworkSelectionStatus = getStatus;
-            }
-            Object status = getStatus.invoke(config);
-            if (status == null) {
-                return -1;
-            }
-
-            Method getReason = sGetNetworkSelectionDisableReason;
-            if (getReason == null) {
-                getReason = status.getClass().getDeclaredMethod(
-                        "getNetworkSelectionDisableReason");
-                getReason.setAccessible(true);
-                sGetNetworkSelectionDisableReason = getReason;
-            }
-            Object reason = getReason.invoke(status);
-            return reason instanceof Integer ? (Integer) reason : -1;
-        } catch (NoSuchMethodException | IllegalAccessException | SecurityException e) {
-            // Hidden API access is unavailable in this process.  Keep the MIUI broadcast path
-            // working and stop calling into reflection on every poll.
-            sDisableReasonUnavailable = true;
-            logError("NetworkSelectionStatus is not accessible", e);
-            return -1;
-        } catch (Throwable t) {
-            logError("Unable to read NetworkSelectionStatus", t);
-            return -1;
         }
     }
 
@@ -482,10 +365,6 @@ public final class WifiAuthCleanupModule extends XposedModule {
         });
     }
 
-    // ---------------------------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------------------------
-
     private static void registerReceiverIfPossible() {
         Context context = sContext;
         if (context == null || sReceiverRegistered) {
@@ -497,19 +376,11 @@ public final class WifiAuthCleanupModule extends XposedModule {
             }
             try {
                 IntentFilter filter = new IntentFilter();
-                filter.addAction(ACTION_MIUI_WIFI_CONNECTION_FAILURE);
+                filter.addAction(ACTION_WIFI_CONNECTION_FAILURE);
                 filter.addAction(WifiManager.SUPPLICANT_STATE_CHANGED_ACTION);
                 filter.addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION);
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    // The MIUI/HyperOS WIFI_CONNECTION_FAILURE broadcast may be sent by another
-                    // process (Settings itself registers an exported receiver for it), so the
-                    // receiver has to be exported.  The handler validates the SSID against an
-                    // active Settings connection attempt before removing anything.
-                    context.registerReceiver(RECEIVER, filter, Context.RECEIVER_EXPORTED);
-                } else {
-                    context.registerReceiver(RECEIVER, filter);
-                }
+                context.registerReceiver(RECEIVER, filter, Context.RECEIVER_EXPORTED);
                 sReceiverRegistered = true;
                 logInfo("Broadcast receiver registered");
             } catch (Throwable t) {
@@ -518,10 +389,10 @@ public final class WifiAuthCleanupModule extends XposedModule {
         }
     }
 
-    private static void schedulePoll(long delayMs) {
+    private static void scheduleRemoval(long delayMs) {
         Handler worker = ensureWorker();
-        worker.removeCallbacks(POLL_RUNNABLE);
-        worker.postDelayed(POLL_RUNNABLE, delayMs);
+        worker.removeCallbacks(REMOVE_FAILED_RUNNABLE);
+        worker.postDelayed(REMOVE_FAILED_RUNNABLE, delayMs);
     }
 
     private static Handler ensureWorker() {
@@ -559,16 +430,34 @@ public final class WifiAuthCleanupModule extends XposedModule {
                 return ((Context) value).getApplicationContext();
             }
         } catch (Throwable ignored) {
-            // No context available; polling still works, only the toast is skipped.
+            // A context is only required for broadcasts and the confirmation toast.
         }
         return null;
     }
 
-    private static String normalizeSsid(String ssid) {
-        if (ssid == null) {
-            return null;
+    private static String readSystemProperty(String key) {
+        try {
+            Class<?> systemProperties = Class.forName("android.os.SystemProperties");
+            Method get = systemProperties.getDeclaredMethod("get", String.class);
+            get.setAccessible(true);
+            Object value = get.invoke(null, key);
+            return value instanceof String ? (String) value : "";
+        } catch (Throwable t) {
+            logError("Could not read system property " + key, t);
+            return "";
         }
-        if (ssid.length() >= 2 && ssid.charAt(0) == '"'
+    }
+
+    private static boolean isHyperOs() {
+        return sHyperOsVersion != null && !sHyperOsVersion.isEmpty();
+    }
+
+    private static boolean isUsableSsid(String ssid) {
+        return ssid != null && !ssid.isEmpty() && !"<unknown ssid>".equalsIgnoreCase(ssid);
+    }
+
+    private static String normalizeSsid(String ssid) {
+        if (ssid != null && ssid.length() >= 2 && ssid.charAt(0) == '"'
                 && ssid.charAt(ssid.length() - 1) == '"') {
             return ssid.substring(1, ssid.length() - 1);
         }
@@ -589,12 +478,11 @@ public final class WifiAuthCleanupModule extends XposedModule {
 
     private static final class Attempt {
         final String ssid;
-        final long startedAt;
-        volatile boolean authFailureSeen;
+        volatile boolean authenticationFailed;
+        volatile long failureAt;
 
         Attempt(String ssid) {
             this.ssid = ssid;
-            this.startedAt = SystemClock.elapsedRealtime();
         }
     }
 }
