@@ -41,7 +41,7 @@ public final class WifiAuthCleanupModule extends XposedModule {
     private static final long MISSING_CONFIG_GRACE_MS = 10_000L;
     private static final long RECENT_SAVE_WINDOW_MS = 15_000L;
 
-    private static final String TOAST_TEXT = "Wi-Fi 密码验证失败，已取消保存该网络";
+    private static final String TOAST_TEXT = "密码认证失败，已取消保存该网络";
 
     private static final Map<String, Attempt> ATTEMPTS = new ConcurrentHashMap<>();
     private static final Map<String, Long> RECENT_SAVES = new ConcurrentHashMap<>();

@@ -18,7 +18,7 @@ android {
         applicationId = "io.github.aetherpx.wifiauthcleanup"
         minSdk = 33
         targetSdk = 37
-        versionCode = 6
+        versionCode = 7
         versionName = "1.2.0"
     }
 
