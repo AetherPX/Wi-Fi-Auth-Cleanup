@@ -1,171 +1,180 @@
 # Wi-Fi Auth Cleanup
 
-一个仅适用于 Xiaomi HyperOS 的 LSPosed Wi-Fi 认证失败清理模块。
+**English** | [简体中文](README_zh-CN.md)
 
-系统设置在连接 Wi-Fi 时会先保存网络配置，再进行密码认证。如果密码错误，配置仍可能留在“已保存网络”中。本模块会跟踪由系统设置提交的连接，在确认认证失败后自动删除对应配置。
+An LSPosed module for cleaning up failed Wi-Fi configurations on Xiaomi HyperOS.
 
-> 模块通过 `ro.mi.os.version.name` 检测 HyperOS。属性不存在时不会安装任何 Hook。
+Android Settings saves a Wi-Fi configuration before authenticating its credentials. If authentication fails, the incorrect configuration may remain in Saved networks. This module tracks connections submitted by Settings and removes the corresponding configuration after a confirmed authentication failure.
 
-## 功能
+> The module detects HyperOS through `ro.mi.os.version.name`. It installs no hooks when that property is absent.
 
-- 自动移除认证失败后残留的 Wi-Fi 配置。
-- 只跟踪系统设置刚提交的连接，不清理普通后台自动重连记录。
-- 使用 HyperOS 认证失败广播和 Supplicant 认证错误双重检测。
-- 正确连接时立即结束跟踪，不影响正常保存的网络。
-- 删除失败时自动重试，成功后显示提示。
-- 支持 Xposed API 102 自动热重载，更新 APK 后无需重启“设置”进程。
-- 不读取密码内容，不持久化连接记录，也不申请网络权限。
-- 不包含配置界面、桌面图标或后台服务。
+## Features
 
-## 兼容性
+- Removes newly saved Wi-Fi configurations after authentication failure.
+- Tracks only connections just submitted by Settings; ordinary background reconnections are ignored.
+- Combines the HyperOS connection-failure broadcast with Supplicant authentication errors.
+- Stops tracking immediately after a real successful connection.
+- Retries removal when the framework is still finishing the failed connection.
+- Supports automatic hot reload with Xposed API 102.
+- Displays the module description and runtime notification in Chinese or English according to the default system language.
+- Does not read password contents, persist connection history, or request network permissions.
+- Has no settings screen, launcher icon, or background service.
 
-| 项目 | 值 |
+## Compatibility
+
+| Item | Value |
 | --- | --- |
-| 应用包名 | `io.github.aetherpx.wifiauthcleanup` |
-| Xposed API | 102（minimum / target） |
-| 默认作用域 | `com.android.settings` |
+| Package | `io.github.aetherpx.wifiauthcleanup` |
+| Xposed API | 102 (minimum / target) |
+| Default scope | `com.android.settings` |
 | `minSdk` | 33 |
 | `targetSdk` / `compileSdk` | 37 |
-| 主要测试目标 | Android 17 / HyperOS，`com.android.settings` version 17 |
-| HyperOS 检测属性 | `ro.mi.os.version.name` |
+| Primary target | Android 17 / HyperOS, `com.android.settings` version 17 |
+| HyperOS property | `ro.mi.os.version.name` |
 
-`minSdk` 对应 HyperOS 的 Android 基线，但不代表兼容所有 Android 13+ 系统。MIUI、AOSP 和其他厂商 ROM 会在运行时直接禁用模块。
+`minSdk` represents the Android baseline used by HyperOS; it does not imply compatibility with every Android 13+ ROM. The module detaches itself at runtime on MIUI, AOSP, and other vendor ROMs.
 
-模块要求框架支持 Xposed API 102；API 101 框架无法加载此版本。
+The framework must support Xposed API 102. API 101 frameworks cannot load this version.
 
-## 安装与使用
+## Installation and usage
 
-1. 安装构建得到的 APK。
-2. 在 LSPosed 中启用 **Wi-Fi Auth Cleanup**。
-3. 确认作用域为“设置” (`com.android.settings`)。
-4. 强制停止“设置”应用，或重启设备以重新注入模块。
-5. 在系统设置中正常连接 Wi-Fi。
+1. Install the generated APK.
+2. Enable **Wi-Fi Auth Cleanup** in LSPosed.
+3. Confirm that Settings (`com.android.settings`) is the selected scope.
+4. Force-stop Settings or reboot once to inject the module.
+5. Connect to Wi-Fi normally from system Settings.
 
-密码错误并被系统判定为认证失败后，模块会删除刚保存的网络并提示：
+After the system confirms an authentication failure, the module removes the newly saved network and displays:
+
+```text
+Authentication failed. This network was not saved.
+```
+
+On a Chinese system, the message is shown as:
 
 ```text
 密码认证失败，已取消保存该网络
 ```
 
-首次测试前建议先手动忘记同名测试网络，以免旧配置干扰结果。部分路由器或系统可能需要数秒至数十秒才会报告认证失败。
+Before the first test, manually forget any existing network with the same SSID so an old configuration cannot affect the result. Depending on the router and system, reporting an authentication failure can take several seconds.
 
-## 实现原理
+## How it works
 
-### 连接跟踪
+### Connection tracking
 
-模块 Hook 以下系统 API：
+The module hooks these framework APIs:
 
 ```text
 WifiManager.save(WifiConfiguration, ActionListener)
 WifiManager.connect(WifiConfiguration, ActionListener)
 ```
 
-`save()` 用于标记刚由设置提交的配置，`connect()` 用于开始跟踪连接。对于早已保存且本次没有重新提交的网络，模块不会建立清理任务。
+`save()` marks a configuration just submitted by Settings, while `connect()` starts tracking the attempt. A previously saved network that was not resubmitted does not create a cleanup task.
 
-### 失败检测
+### Failure detection
 
-模块组合使用两种已在目标系统验证的信号：
+Two signals verified on the target HyperOS build are used:
 
-1. **HyperOS 广播**  
-   监听 `miui.intent.action.WIFI_CONNECTION_FAILURE`，优先使用广播中的 `WifiConfiguration` 精确删除失败网络。
-2. **Supplicant 认证错误**  
-   监听 `SUPPLICANT_STATE_CHANGED_ACTION` 中的 `ERROR_AUTHENTICATING`，再按本次连接的 SSID 定位并删除配置。
+1. **HyperOS broadcast**
+   `miui.intent.action.WIFI_CONNECTION_FAILURE` carries the failed `WifiConfiguration`, allowing the exact network to be removed first.
+2. **Supplicant authentication error**
+   `ERROR_AUTHENTICATING` from `SUPPLICANT_STATE_CHANGED_ACTION` identifies the active attempt by SSID and schedules removal.
 
-只有收到真实的 `NetworkInfo.CONNECTED` 状态后，连接才会被判定为成功。仅出现目标 SSID 不代表认证完成，这可以避免在握手阶段提前停止监控。
+A connection is considered successful only after a real `NetworkInfo.CONNECTED` state. Seeing the target SSID alone does not mean authentication has completed.
 
-### 删除策略
+### Removal strategy
 
-认证失败后调用：
+After authentication failure, the module calls:
 
 ```text
 WifiManager.removeNetwork(networkId)
 ```
 
-模块不会持续轮询 Wi-Fi 状态。只有收到明确的认证失败信号后，才查询已保存网络并执行删除；如果框架仍在结束失败连接而暂时拒绝删除，则每 1.5 秒重试，最长跟踪 120 秒。
+It does not continuously poll Wi-Fi state. Saved networks are queried only after an explicit authentication-failure signal. If the framework temporarily refuses removal, the module retries every 1.5 seconds. An attempt is tracked for at most 120 seconds.
 
-### API 102 热重载
+### API 102 hot reload
 
-模块只声明一个 Java 入口类，满足 API 102 的热重载要求；`module.prop` 启用了 `autoHotReload=true`。APK 更新触发热重载时，旧代码会：
+The module declares exactly one Java entry and sets `autoHotReload=true` in `module.prop`. Before reloading, the old generation:
 
-1. 停止接收新的 Hook 事件。
-2. 注销动态广播接收器。
-3. 清空主线程和工作线程回调。
-4. 停止并等待模块的 `HandlerThread` 退出。
-5. 清空仅存在于旧类加载器中的连接状态。
+1. Stops accepting new hook events.
+2. Unregisters its dynamic broadcast receiver.
+3. Removes pending main-thread and worker callbacks.
+4. Stops and joins its `HandlerThread`.
+5. Clears connection state owned by the old class loader.
 
-新代码不会等待包生命周期回调重放，而是通过固定 Hook ID 原子替换旧的 `save()` 和 `connect()` Hook。更新发生时正在进行的 Wi-Fi 尝试会被放弃跟踪，之后的新连接会使用新代码。
+The new generation does not wait for package lifecycle callbacks to be replayed. Stable hook IDs atomically replace the old `save()` and `connect()` hooks. A Wi-Fi attempt already in progress during an update is intentionally discarded; later attempts use the new code.
 
-从 API 101 版本首次升级到本版本时，旧代码无法批准热重载，因此仍需强制停止一次“设置”或重启设备。完成首次 API 102 加载后，后续更新可自动热重载。
+When upgrading from the API 101 release for the first time, the old generation cannot approve hot reload. Force-stop Settings or reboot once after installing this release. Subsequent API 102 updates can reload automatically.
 
-自动更新仍要求新旧 APK 使用相同签名；仓库中的固定测试密钥满足当前测试构建的覆盖安装要求。
+Automatic updates still require the old and new APKs to use the same signing certificate. The repository's fixed test key satisfies this requirement for test builds.
 
-## 构建
+## Building
 
 ### GitHub Actions
 
-工作流文件为 `.github/workflows/build.yml`，支持以下触发方式：
+The workflow is defined in `.github/workflows/build.yml` and runs on:
 
-- 推送到 `main`
-- Pull Request
-- 手动运行 `workflow_dispatch`
+- pushes to `main`
+- pull requests
+- manual `workflow_dispatch`
 
-成功后从该次工作流的 Artifacts 下载 `WifiAuthCleanup-release`。
+Download `WifiAuthCleanup-release` from the completed workflow's Artifacts.
 
-### 本地构建
+### Local build
 
-需要 JDK 21、Android SDK Platform 37 和 Build Tools 37.0.0：
+Requirements: JDK 21, Android SDK Platform 37, and Build Tools 37.0.0.
 
 ```bash
 ./gradlew :app:assembleRelease
 ```
 
-APK 输出位置：
+Output:
 
 ```text
 app/build/outputs/apk/release/app-release.apk
 ```
 
-Release 构建启用了 R8 代码优化、混淆和资源压缩。AGP 9 即使在纯 Java 模块中也会向未压缩构建加入 Kotlin 标准库；R8 会删除这些不可达代码，同时保留 Xposed 入口类。当前环境的实测结果：
+Release builds enable R8 optimization, obfuscation, and resource shrinking. AGP 9 adds Kotlin stdlib even to an otherwise Java-only module; R8 removes that unreachable code while preserving the Xposed entry point.
 
-| 构建 | APK 大小 | DEX 类数量 |
+| Build | APK size | DEX classes |
 | --- | ---: | ---: |
-| 优化前 | 2,088,273 字节 | 1,090 |
-| API 102 + R8 | 21,181 字节 | 8 |
+| Before optimization | 2,088,273 bytes | 1,090 |
+| API 102 + R8 | 21,633 bytes | 8 |
 
-体积仍比未优化版本减少约 **99%**。不同 AGP/R8 版本生成的具体字节数可能略有变化。R8 映射文件位于：
+The optimized APK is about **99%** smaller. Exact size may vary slightly between AGP/R8 versions. The R8 mapping is written to:
 
 ```text
 app/build/outputs/mapping/release/mapping.txt
 ```
 
-Android 17 SDK 的包名为 `platforms;android-37.0`。如果 AGP 查找的是 `platforms/android-37`，可安装平台后创建兼容链接：
+The Android 17 SDK package is named `platforms;android-37.0`. If AGP looks for `platforms/android-37`, install the platform and create a compatibility link:
 
 ```bash
 sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
 ln -sfn android-37.0 "$ANDROID_HOME/platforms/android-37"
 ```
 
-GitHub Actions 已自动执行相同的 SDK 安装与目录兼容处理。
+The GitHub Actions workflow performs the same SDK installation and compatibility setup automatically.
 
-## 构建签名
+## Signing
 
-debug 和 release 均使用仓库中的固定测试密钥：
+Debug and release builds use the fixed test key in:
 
 ```text
 signing/wifi-auth-cleanup.p12
 ```
 
-证书 SHA-256：
+Certificate SHA-256:
 
 ```text
 0D:22:1D:15:FC:FC:54:A6:35:2C:FC:D9:3C:2C:21:AF:9A:90:42:9A:41:25:FB:35:D7:6A:68:AC:A1:42:2E:99
 ```
 
-该私钥随源码公开，仅用于保持测试构建签名一致，不能代表可信发布身份。正式发布时应替换为私有密钥并永久妥善保存；Android 不允许使用不同签名覆盖现有安装。
+The private key is intentionally public and exists only to keep test builds update-compatible. It is not a trusted release identity. Replace it with a permanently secured private key before publishing; Android cannot install an update signed with a different certificate over an existing installation.
 
-## 日志与排查
+## Logs and troubleshooting
 
-模块日志位于 LSPosed 的模块日志页面。一次错误密码清理通常会出现以下顺序：
+Logs are available from the module log page in LSPosed. A typical failed-password cleanup produces:
 
 ```text
 Loaded into com.android.settings on HyperOS ...
@@ -175,7 +184,7 @@ removeNetwork(...) via authentication failure -> true
 Removed network "..." because authentication failed
 ```
 
-热重载成功时会出现：
+A successful hot reload produces:
 
 ```text
 Preparing API 102 hot reload
@@ -183,16 +192,16 @@ Installed Wi-Fi hooks
 Hot reloaded on HyperOS ...
 ```
 
-非 HyperOS 系统只会记录 `HyperOS not detected; module disabled`。在 HyperOS 上，如果只有加载和 Hook 成功日志，却没有 `Monitoring connection attempt`，说明当前设置版本没有调用所 Hook 的连接入口；如果已有监控日志但没有认证失败记录，请保留完整 LSPosed 日志用于适配。
+On a non-HyperOS system, only `HyperOS not detected; module disabled` is logged. If HyperOS shows successful module loading and hook installation but no `Monitoring connection attempt`, that Settings version did not call the hooked connection entry points. Preserve the complete LSPosed log when requesting adaptation.
 
-## 已知限制
+## Known limitations
 
-- 信号过差、AP 主动拒绝或认证超时也可能被系统归类为认证失败，此时网络同样会被清理。
-- 模块只处理系统设置进程发起的连接，不处理第三方 Wi-Fi 管理应用。
-- 在认证失败回调到达前强制结束“设置”进程，可能导致清理来不及执行。
-- 本模块不支持 MIUI、AOSP 或其他厂商 ROM。
-- HyperOS 更新可能改变广播或连接流程，需要根据新日志重新适配。
+- Weak signal, an AP rejection, or an authentication timeout may also be classified as an authentication failure and cause cleanup.
+- Only connections initiated by system Settings are handled; third-party Wi-Fi managers are not covered.
+- Killing Settings before its authentication-failure callback arrives can prevent cleanup.
+- MIUI, AOSP, and non-HyperOS vendor ROMs are not supported.
+- HyperOS updates can change broadcasts or connection flows and may require adaptation.
 
 ## License
 
-本项目使用 [Apache License 2.0](LICENSE)。
+Licensed under the [Apache License 2.0](LICENSE).

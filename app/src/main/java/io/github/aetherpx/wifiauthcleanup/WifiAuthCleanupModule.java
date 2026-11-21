@@ -18,6 +18,7 @@ import android.widget.Toast;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -44,7 +45,9 @@ public final class WifiAuthCleanupModule extends XposedModule {
     private static final long MISSING_CONFIG_GRACE_MS = 10_000L;
     private static final long RECENT_SAVE_WINDOW_MS = 15_000L;
 
-    private static final String TOAST_TEXT = "密码认证失败，已取消保存该网络";
+    private static final String TOAST_TEXT_EN =
+            "Authentication failed. This network was not saved.";
+    private static final String TOAST_TEXT_ZH = "密码认证失败，已取消保存该网络";
 
     private static final Map<String, Attempt> ATTEMPTS = new ConcurrentHashMap<>();
     private static final Map<String, Long> RECENT_SAVES = new ConcurrentHashMap<>();
@@ -526,7 +529,7 @@ public final class WifiAuthCleanupModule extends XposedModule {
         }
         ensureMainHandler().post(() -> {
             try {
-                Toast.makeText(context, TOAST_TEXT, Toast.LENGTH_LONG).show();
+                Toast.makeText(context, getToastText(), Toast.LENGTH_LONG).show();
             } catch (Throwable t) {
                 logError("Toast failed", t);
             }
@@ -648,6 +651,12 @@ public final class WifiAuthCleanupModule extends XposedModule {
 
     private static boolean ssidEquals(String left, String right) {
         return right != null && right.equals(normalizeSsid(left));
+    }
+
+    private static String getToastText() {
+        return "zh".equals(Locale.getDefault().getLanguage())
+                ? TOAST_TEXT_ZH
+                : TOAST_TEXT_EN;
     }
 
     private static void logInfo(String message) {
