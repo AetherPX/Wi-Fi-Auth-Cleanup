@@ -162,19 +162,24 @@ The GitHub Actions workflow performs the same SDK installation and compatibility
 
 ## Signing
 
-Debug and release builds use the fixed test key in:
+No private key or password is stored in the repository. Official GitHub Actions builds reconstruct the original PKCS#12 key from these Repository Secrets:
 
-```text
-signing/wifi-auth-cleanup.p12
-```
+| Secret | Purpose |
+| --- | --- |
+| `SIGNING_KEY_BASE64` | Base64-encoded PKCS#12 file |
+| `SIGNING_STORE_PASSWORD` | Keystore password |
+| `SIGNING_KEY_ALIAS` | Key alias |
+| `SIGNING_KEY_PASSWORD` | Key password |
+
+Push and manual builds fail if the secrets are missing. Pull requests without secret access use a temporary certificate and are not update-compatible.
+
+For local builds, create an ignored `signing.properties` file and keep the keystore outside the repository. See [signing/README.md](signing/README.md) for the required format.
 
 Certificate SHA-256:
 
 ```text
 0D:22:1D:15:FC:FC:54:A6:35:2C:FC:D9:3C:2C:21:AF:9A:90:42:9A:41:25:FB:35:D7:6A:68:AC:A1:42:2E:99
 ```
-
-The private key is intentionally public and exists only to keep test builds update-compatible. It is not a trusted release identity. Replace it with a permanently secured private key before publishing; Android cannot install an update signed with a different certificate over an existing installation.
 
 ## Logs and troubleshooting
 

@@ -162,19 +162,24 @@ GitHub Actions 已自动执行相同的 SDK 安装与目录兼容处理。
 
 ## 构建签名
 
-debug 和 release 均使用仓库中的固定测试密钥：
+仓库不再保存私钥或密码。GitHub Actions 正式构建通过以下 Repository Secrets 还原原 PKCS#12 密钥：
 
-```text
-signing/wifi-auth-cleanup.p12
-```
+| Secret | 用途 |
+| --- | --- |
+| `SIGNING_KEY_BASE64` | PKCS#12 文件的 Base64 内容 |
+| `SIGNING_STORE_PASSWORD` | 密钥库密码 |
+| `SIGNING_KEY_ALIAS` | 密钥别名 |
+| `SIGNING_KEY_PASSWORD` | 私钥密码 |
+
+Push 和手动构建缺少 Secrets 时会直接失败。无法访问 Secrets 的 Pull Request 使用临时证书，因此其 APK 不能覆盖正式版本。
+
+本地构建时需要创建已被 Git 忽略的 `signing.properties`，并将密钥库保存在仓库外。配置格式见 [signing/README.md](signing/README.md)。
 
 证书 SHA-256：
 
 ```text
 0D:22:1D:15:FC:FC:54:A6:35:2C:FC:D9:3C:2C:21:AF:9A:90:42:9A:41:25:FB:35:D7:6A:68:AC:A1:42:2E:99
 ```
-
-该私钥随源码公开，仅用于保持测试构建签名一致，不能代表可信发布身份。正式发布时应替换为私有密钥并永久妥善保存；Android 不允许使用不同签名覆盖现有安装。
 
 ## 日志与排查
 

@@ -26,6 +26,58 @@ jobs:
           java-version: '21'
           cache: gradle
 
+      - name: Configure APK signing
+        shell: bash
+        env:
+          SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          SIGNING_DIR="$RUNNER_TEMP/wifi-auth-cleanup-signing"
+          KEYSTORE="$SIGNING_DIR/wifi-auth-cleanup.p12"
+          mkdir -p "$SIGNING_DIR"
+
+          if [[ -n "${SIGNING_KEY_BASE64:-}" \
+              && -n "${SIGNING_STORE_PASSWORD:-}" \
+              && -n "${SIGNING_KEY_ALIAS:-}" \
+              && -n "${SIGNING_KEY_PASSWORD:-}" ]]; then
+            printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$KEYSTORE"
+          elif [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            SIGNING_STORE_PASSWORD=android
+            SIGNING_KEY_ALIAS=pull-request
+            SIGNING_KEY_PASSWORD=android
+            keytool -genkeypair -noprompt \
+              -storetype PKCS12 \
+              -keystore "$KEYSTORE" \
+              -storepass "$SIGNING_STORE_PASSWORD" \
+              -alias "$SIGNING_KEY_ALIAS" \
+              -keypass "$SIGNING_KEY_PASSWORD" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 30 \
+              -dname "CN=Pull Request Build"
+          else
+            echo "::error::Required signing secrets are not configured"
+            exit 1
+          fi
+
+          chmod 600 "$KEYSTORE"
+          keytool -list \
+            -storetype PKCS12 \
+            -keystore "$KEYSTORE" \
+            -storepass "$SIGNING_STORE_PASSWORD" \
+            -alias "$SIGNING_KEY_ALIAS" > /dev/null
+
+          {
+            printf 'storeFile=%s\n' "$KEYSTORE"
+            printf 'storePassword=%s\n' "$SIGNING_STORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$SIGNING_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$SIGNING_KEY_PASSWORD"
+          } > signing.properties
+          chmod 600 signing.properties
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
@@ -56,3 +108,10 @@ jobs:
           name: WifiAuthCleanup-release
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      - name: Remove signing material
+        if: always()
+        shell: bash
+        run: |
+          rm -f signing.properties
+          rm -f "$RUNNER_TEMP/wifi-auth-cleanup-signing/wifi-auth-cleanup.p12"

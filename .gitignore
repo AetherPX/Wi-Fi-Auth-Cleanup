@@ -3,4 +3,8 @@
 .gradle/
 .idea/
 local.properties
+signing.properties
+*.jks
+*.keystore
+*.p12
 build/

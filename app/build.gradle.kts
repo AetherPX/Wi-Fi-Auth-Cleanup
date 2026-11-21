@@ -1,10 +1,23 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.agp.app)
 }
 
-val stableSigningFile = rootProject.file("signing/wifi-auth-cleanup.p12")
-val stableSigningPassword = "REDACTED_SIGNING_PASSWORD"
+val signingPropertiesFile = rootProject.file("signing.properties")
+check(signingPropertiesFile.isFile) {
+    "Missing signing.properties; see signing/README.md"
+}
 
+val signingProperties = Properties().apply {
+    signingPropertiesFile.inputStream().use { load(it) }
+}
+
+fun signingProperty(name: String): String =
+    signingProperties.getProperty(name)?.takeIf(String::isNotBlank)
+        ?: error("Missing signing property: $name")
+
+val stableSigningFile = rootProject.file(signingProperty("storeFile"))
 check(stableSigningFile.isFile) {
     "Missing stable signing key: ${stableSigningFile.absolutePath}"
 }
@@ -25,9 +38,9 @@ android {
     signingConfigs {
         create("stable") {
             storeFile = stableSigningFile
-            storePassword = stableSigningPassword
-            keyAlias = "wifi-auth-cleanup"
-            keyPassword = stableSigningPassword
+            storePassword = signingProperty("storePassword")
+            keyAlias = signingProperty("keyAlias")
+            keyPassword = signingProperty("keyPassword")
             storeType = "PKCS12"
         }
     }
