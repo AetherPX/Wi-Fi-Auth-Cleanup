@@ -18,8 +18,8 @@ android {
         applicationId = "io.github.aetherpx.wifiauthcleanup"
         minSdk = 33
         targetSdk = 37
-        versionCode = 10
-        versionName = "1.3.1"
+        versionCode = 11
+        versionName = "1.3.2"
     }
 
     signingConfigs {

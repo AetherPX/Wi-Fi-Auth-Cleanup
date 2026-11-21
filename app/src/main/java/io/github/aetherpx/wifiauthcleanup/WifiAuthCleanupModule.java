@@ -60,6 +60,7 @@ public final class WifiAuthCleanupModule extends XposedModule {
     private static volatile HandlerThread sWorkerThread;
     private static volatile Handler sMainHandler;
     private static volatile String sHyperOsVersion;
+    private static volatile boolean sActiveProcess;
     private static volatile boolean sHooked;
     private static volatile boolean sReceiverRegistered;
     private static volatile boolean sReloading;
@@ -100,22 +101,22 @@ public final class WifiAuthCleanupModule extends XposedModule {
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
         sModule = this;
         if (!TARGET_PACKAGE.equals(param.getProcessName())) {
-            detach();
+            sActiveProcess = false;
             return;
         }
         sHyperOsVersion = readSystemProperty(HYPER_OS_VERSION_PROPERTY);
-        if (isHyperOs()) {
+        sActiveProcess = isHyperOs();
+        if (sActiveProcess) {
             logInfo("Loaded into " + param.getProcessName() + " on HyperOS " + sHyperOsVersion
                     + " (Xposed API " + getApiVersion() + ")");
         } else {
             logInfo("HyperOS not detected; module disabled in " + param.getProcessName());
-            detach();
         }
     }
 
     @Override
     public void onPackageReady(XposedModuleInterface.PackageReadyParam param) {
-        if (!isHyperOs() || !TARGET_PACKAGE.equals(param.getPackageName())) {
+        if (!sActiveProcess || !TARGET_PACKAGE.equals(param.getPackageName())) {
             return;
         }
         try {
@@ -127,6 +128,9 @@ public final class WifiAuthCleanupModule extends XposedModule {
 
     @Override
     public boolean onHotReloading(XposedModuleInterface.HotReloadingParam param) {
+        if (!sActiveProcess) {
+            return true;
+        }
         sReloading = true;
         logInfo("Preparing API 102 hot reload");
         boolean ready = releaseRuntimeResources();
@@ -142,16 +146,16 @@ public final class WifiAuthCleanupModule extends XposedModule {
         sModule = this;
         sReloading = false;
         if (!TARGET_PACKAGE.equals(param.getProcessName())) {
+            sActiveProcess = false;
             unhookAll(param.getOldHookHandles());
-            detach();
             return;
         }
 
         sHyperOsVersion = readSystemProperty(HYPER_OS_VERSION_PROPERTY);
-        if (!isHyperOs()) {
+        sActiveProcess = isHyperOs();
+        if (!sActiveProcess) {
             unhookAll(param.getOldHookHandles());
             logInfo("HyperOS not detected after hot reload; module disabled");
-            detach();
             return;
         }
 
@@ -436,6 +440,12 @@ public final class WifiAuthCleanupModule extends XposedModule {
     }
 
     private static void removeFailedAttempts() {
+        synchronized (LOCK) {
+            removeFailedAttemptsLocked();
+        }
+    }
+
+    private static void removeFailedAttemptsLocked() {
         if (sReloading || ATTEMPTS.isEmpty()) {
             return;
         }

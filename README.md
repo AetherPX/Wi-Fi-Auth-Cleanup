@@ -32,7 +32,7 @@ Android Settings saves a Wi-Fi configuration before authenticating its credentia
 | Primary target | Android 17 / HyperOS, `com.android.settings` version 17 |
 | HyperOS property | `ro.mi.os.version.name` |
 
-`minSdk` represents the Android baseline used by HyperOS; it does not imply compatibility with every Android 13+ ROM. The module detaches itself at runtime on MIUI, AOSP, and other vendor ROMs.
+`minSdk` represents the Android baseline used by HyperOS; it does not imply compatibility with every Android 13+ ROM. The module remains inactive and installs no hooks on MIUI, AOSP, and other vendor ROMs.
 
 The framework must support Xposed API 102. API 101 frameworks cannot load this version.
 
@@ -104,7 +104,11 @@ The module declares exactly one Java entry and sets `autoHotReload=true` in `mod
 
 The new generation does not wait for package lifecycle callbacks to be replayed. Stable hook IDs atomically replace the old `save()` and `connect()` hooks. A Wi-Fi attempt already in progress during an update is intentionally discarded; later attempts use the new code.
 
+Only the main `com.android.settings` process installs hooks. Auxiliary Settings processes keep an idle lifecycle entry so LSPosed can complete hot reload for every scoped process without reporting a detached-entry failure.
+
 When upgrading from the API 101 release for the first time, the old generation cannot approve hot reload. Force-stop Settings or reboot once after installing this release. Subsequent API 102 updates can reload automatically.
+
+Version 1.3.1 detached auxiliary process entries. After upgrading from 1.3.1, force-stop all Settings processes or reboot once; subsequent updates from 1.3.2 or newer can hot reload every scoped process normally.
 
 Automatic updates still require the old and new APKs to use the same signing certificate. The repository's fixed test key satisfies this requirement for test builds.
 
@@ -139,7 +143,7 @@ Release builds enable R8 optimization, obfuscation, and resource shrinking. AGP 
 | Build | APK size | DEX classes |
 | --- | ---: | ---: |
 | Before optimization | 2,088,273 bytes | 1,090 |
-| API 102 + R8 | 21,633 bytes | 8 |
+| API 102 + R8 | 21,697 bytes | 8 |
 
 The optimized APK is about **99%** smaller. Exact size may vary slightly between AGP/R8 versions. The R8 mapping is written to:
 
