@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
@@ -30,6 +31,8 @@ public final class WifiAuthCleanupModule extends XposedModule {
     private static final String TAG = "WifiAuthCleanup";
     private static final String TARGET_PACKAGE = "com.android.settings";
     private static final String HYPER_OS_VERSION_PROPERTY = "ro.mi.os.version.name";
+    private static final String HOOK_ID_SAVE = "wifi-auth-cleanup:save";
+    private static final String HOOK_ID_CONNECT = "wifi-auth-cleanup:connect";
 
     private static final String ACTION_WIFI_CONNECTION_FAILURE =
             "miui.intent.action.WIFI_CONNECTION_FAILURE";
@@ -51,9 +54,12 @@ public final class WifiAuthCleanupModule extends XposedModule {
     private static volatile WifiManager sWifiManager;
     private static volatile Context sContext;
     private static volatile Handler sWorker;
+    private static volatile HandlerThread sWorkerThread;
+    private static volatile Handler sMainHandler;
     private static volatile String sHyperOsVersion;
     private static volatile boolean sHooked;
     private static volatile boolean sReceiverRegistered;
+    private static volatile boolean sReloading;
 
     private static final Runnable REMOVE_FAILED_RUNNABLE =
             WifiAuthCleanupModule::removeFailedAttempts;
@@ -61,22 +67,27 @@ public final class WifiAuthCleanupModule extends XposedModule {
     private static final BroadcastReceiver RECEIVER = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-            if (ACTION_WIFI_CONNECTION_FAILURE.equals(action)) {
-                onHyperOsConnectionFailure(intent);
-                return;
-            }
-            if (WifiManager.SUPPLICANT_STATE_CHANGED_ACTION.equals(action)) {
-                int error = intent.getIntExtra(WifiManager.EXTRA_SUPPLICANT_ERROR, -1);
-                if (error == WifiManager.ERROR_AUTHENTICATING) {
-                    onSupplicantAuthFailure();
+            synchronized (LOCK) {
+                if (sReloading) {
+                    return;
                 }
-                return;
-            }
-            if (WifiManager.NETWORK_STATE_CHANGED_ACTION.equals(action)) {
-                NetworkInfo info = intent.getParcelableExtra(WifiManager.EXTRA_NETWORK_INFO);
-                if (info != null && info.isConnected()) {
-                    onNetworkConnected();
+                String action = intent.getAction();
+                if (ACTION_WIFI_CONNECTION_FAILURE.equals(action)) {
+                    onHyperOsConnectionFailure(intent);
+                    return;
+                }
+                if (WifiManager.SUPPLICANT_STATE_CHANGED_ACTION.equals(action)) {
+                    int error = intent.getIntExtra(WifiManager.EXTRA_SUPPLICANT_ERROR, -1);
+                    if (error == WifiManager.ERROR_AUTHENTICATING) {
+                        onSupplicantAuthFailure();
+                    }
+                    return;
+                }
+                if (WifiManager.NETWORK_STATE_CHANGED_ACTION.equals(action)) {
+                    NetworkInfo info = intent.getParcelableExtra(WifiManager.EXTRA_NETWORK_INFO);
+                    if (info != null && info.isConnected()) {
+                        onNetworkConnected();
+                    }
                 }
             }
         }
@@ -86,6 +97,7 @@ public final class WifiAuthCleanupModule extends XposedModule {
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
         sModule = this;
         if (!TARGET_PACKAGE.equals(param.getProcessName())) {
+            detach();
             return;
         }
         sHyperOsVersion = readSystemProperty(HYPER_OS_VERSION_PROPERTY);
@@ -94,6 +106,7 @@ public final class WifiAuthCleanupModule extends XposedModule {
                     + " (Xposed API " + getApiVersion() + ")");
         } else {
             logInfo("HyperOS not detected; module disabled in " + param.getProcessName());
+            detach();
         }
     }
 
@@ -102,41 +115,180 @@ public final class WifiAuthCleanupModule extends XposedModule {
         if (!isHyperOs() || !TARGET_PACKAGE.equals(param.getPackageName())) {
             return;
         }
-        synchronized (LOCK) {
-            if (sHooked) {
-                return;
-            }
-            sHooked = true;
-        }
-
         try {
-            Class<?> actionListenerClass = Class.forName(
-                    "android.net.wifi.WifiManager$ActionListener",
-                    false,
-                    param.getClassLoader());
-            Method save = WifiManager.class.getDeclaredMethod(
-                    "save", WifiConfiguration.class, actionListenerClass);
-            Method connect = WifiManager.class.getDeclaredMethod(
-                    "connect", WifiConfiguration.class, actionListenerClass);
-
-            hook(save).intercept(chain -> {
-                onSave(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
-                return chain.proceed();
-            });
-            logInfo("Hooked WifiManager.save(WifiConfiguration, ActionListener)");
-
-            hook(connect).intercept(chain -> {
-                onConnect(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
-                return chain.proceed();
-            });
-            logInfo("Hooked WifiManager.connect(WifiConfiguration, ActionListener)");
+            installHooks();
         } catch (Throwable t) {
             logError("Failed to install hooks", t);
         }
     }
 
+    @Override
+    public boolean onHotReloading(XposedModuleInterface.HotReloadingParam param) {
+        sReloading = true;
+        logInfo("Preparing API 102 hot reload");
+        boolean ready = releaseRuntimeResources();
+        if (!ready) {
+            sReloading = false;
+            logInfo("Hot reload rejected because runtime resources could not be released");
+        }
+        return ready;
+    }
+
+    @Override
+    public void onHotReloaded(XposedModuleInterface.HotReloadedParam param) {
+        sModule = this;
+        sReloading = false;
+        if (!TARGET_PACKAGE.equals(param.getProcessName())) {
+            unhookAll(param.getOldHookHandles());
+            detach();
+            return;
+        }
+
+        sHyperOsVersion = readSystemProperty(HYPER_OS_VERSION_PROPERTY);
+        if (!isHyperOs()) {
+            unhookAll(param.getOldHookHandles());
+            logInfo("HyperOS not detected after hot reload; module disabled");
+            detach();
+            return;
+        }
+
+        unhookUnknown(param.getOldHookHandles());
+        try {
+            installHooks();
+            logInfo("Hot reloaded on HyperOS " + sHyperOsVersion);
+        } catch (Throwable t) {
+            unhookAll(param.getOldHookHandles());
+            logError("Failed to replace hooks during hot reload", t);
+        }
+    }
+
+    private void installHooks() throws Throwable {
+        synchronized (LOCK) {
+            if (sHooked) {
+                return;
+            }
+
+            Class<?> actionListenerClass = Class.forName(
+                    "android.net.wifi.WifiManager$ActionListener",
+                    false,
+                    WifiManager.class.getClassLoader());
+            Method save = WifiManager.class.getDeclaredMethod(
+                    "save", WifiConfiguration.class, actionListenerClass);
+            Method connect = WifiManager.class.getDeclaredMethod(
+                    "connect", WifiConfiguration.class, actionListenerClass);
+
+            XposedInterface.HookHandle saveHandle = hook(save)
+                    .setId(HOOK_ID_SAVE)
+                    .intercept(chain -> {
+                        onSave(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
+                        return chain.proceed();
+                    });
+            try {
+                hook(connect)
+                        .setId(HOOK_ID_CONNECT)
+                        .intercept(chain -> {
+                            onConnect(chain.getThisObject(), (WifiConfiguration) chain.getArg(0));
+                            return chain.proceed();
+                        });
+            } catch (Throwable hookError) {
+                try {
+                    saveHandle.unhook();
+                } catch (Throwable cleanupError) {
+                    hookError.addSuppressed(cleanupError);
+                }
+                throw hookError;
+            }
+            sHooked = true;
+            logInfo("Installed Wi-Fi hooks");
+        }
+    }
+
+    private static boolean releaseRuntimeResources() {
+        // Wait for hook callbacks that entered module state before sReloading became visible.
+        synchronized (LOCK) {
+            // Memory barrier only; new callbacks stop at their sReloading checks.
+        }
+
+        boolean released = true;
+        Context context = sContext;
+        if (sReceiverRegistered && context != null) {
+            try {
+                context.unregisterReceiver(RECEIVER);
+                sReceiverRegistered = false;
+            } catch (IllegalArgumentException ignored) {
+                // The receiver was already removed by the target process.
+                sReceiverRegistered = false;
+            } catch (Throwable t) {
+                released = false;
+                logError("Failed to unregister receiver for hot reload", t);
+            }
+        }
+
+        Handler worker = sWorker;
+        if (worker != null) {
+            worker.removeCallbacksAndMessages(null);
+        }
+        HandlerThread workerThread = sWorkerThread;
+        if (workerThread != null) {
+            workerThread.quit();
+            if (Thread.currentThread() != workerThread) {
+                try {
+                    workerThread.join(2_000L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    released = false;
+                }
+            }
+            if (workerThread.isAlive()) {
+                released = false;
+            } else {
+                sWorkerThread = null;
+                sWorker = null;
+            }
+        }
+
+        Handler mainHandler = sMainHandler;
+        if (mainHandler != null) {
+            mainHandler.removeCallbacksAndMessages(null);
+            sMainHandler = null;
+        }
+
+        synchronized (LOCK) {
+            ATTEMPTS.clear();
+            RECENT_SAVES.clear();
+            sWifiManager = null;
+            if (!sReceiverRegistered) {
+                sContext = null;
+            }
+        }
+        return released;
+    }
+
+    private static void unhookUnknown(List<XposedInterface.HookHandle> oldHooks) {
+        for (XposedInterface.HookHandle handle : oldHooks) {
+            try {
+                String id = handle.getId();
+                if (!HOOK_ID_SAVE.equals(id) && !HOOK_ID_CONNECT.equals(id)) {
+                    handle.unhook();
+                }
+            } catch (Throwable t) {
+                logError("Failed to remove an unknown old hook", t);
+            }
+        }
+    }
+
+    private static void unhookAll(List<XposedInterface.HookHandle> oldHooks) {
+        for (XposedInterface.HookHandle handle : oldHooks) {
+            try {
+                handle.unhook();
+            } catch (Throwable t) {
+                logError("Failed to remove an old hook", t);
+            }
+        }
+    }
+
     private static void onSave(Object thisObject, WifiConfiguration config) {
-        if (config == null) {
+        if (sReloading || config == null) {
             return;
         }
         String ssid = normalizeSsid(config.SSID);
@@ -151,7 +303,7 @@ public final class WifiAuthCleanupModule extends XposedModule {
     }
 
     private static void onConnect(Object thisObject, WifiConfiguration config) {
-        if (config == null) {
+        if (sReloading || config == null) {
             return;
         }
         String ssid = normalizeSsid(config.SSID);
@@ -167,16 +319,21 @@ public final class WifiAuthCleanupModule extends XposedModule {
     }
 
     private static void trackAttempt(WifiManager wifiManager, String ssid, String source) {
-        sWifiManager = wifiManager;
-        if (sContext == null) {
-            sContext = findContext(wifiManager);
-        }
-        registerReceiverIfPossible();
+        synchronized (LOCK) {
+            if (sReloading) {
+                return;
+            }
+            sWifiManager = wifiManager;
+            if (sContext == null) {
+                sContext = findContext(wifiManager);
+            }
+            registerReceiverIfPossible();
 
-        Attempt attempt = new Attempt(ssid);
-        ATTEMPTS.put(ssid, attempt);
-        ensureWorker().postDelayed(() -> expireAttempt(ssid, attempt), ATTEMPT_TIMEOUT_MS);
-        logInfo("Monitoring connection attempt for \"" + ssid + "\" (via " + source + ")");
+            Attempt attempt = new Attempt(ssid);
+            ATTEMPTS.put(ssid, attempt);
+            ensureWorker().postDelayed(() -> expireAttempt(ssid, attempt), ATTEMPT_TIMEOUT_MS);
+            logInfo("Monitoring connection attempt for \"" + ssid + "\" (via " + source + ")");
+        }
     }
 
     private static void expireAttempt(String ssid, Attempt attempt) {
@@ -186,15 +343,26 @@ public final class WifiAuthCleanupModule extends XposedModule {
     }
 
     private static void rememberSave(String ssid) {
-        long now = SystemClock.elapsedRealtime();
-        RECENT_SAVES.entrySet().removeIf(
-                entry -> now - entry.getValue() > RECENT_SAVE_WINDOW_MS);
-        RECENT_SAVES.put(ssid, now);
+        synchronized (LOCK) {
+            if (sReloading) {
+                return;
+            }
+            long now = SystemClock.elapsedRealtime();
+            RECENT_SAVES.entrySet().removeIf(
+                    entry -> now - entry.getValue() > RECENT_SAVE_WINDOW_MS);
+            RECENT_SAVES.put(ssid, now);
+        }
     }
 
     private static boolean consumeRecentSave(String ssid) {
-        Long savedAt = RECENT_SAVES.remove(ssid);
-        return savedAt != null && SystemClock.elapsedRealtime() - savedAt <= RECENT_SAVE_WINDOW_MS;
+        synchronized (LOCK) {
+            if (sReloading) {
+                return false;
+            }
+            Long savedAt = RECENT_SAVES.remove(ssid);
+            return savedAt != null
+                    && SystemClock.elapsedRealtime() - savedAt <= RECENT_SAVE_WINDOW_MS;
+        }
     }
 
     private static void onHyperOsConnectionFailure(Intent intent) {
@@ -265,7 +433,7 @@ public final class WifiAuthCleanupModule extends XposedModule {
     }
 
     private static void removeFailedAttempts() {
-        if (ATTEMPTS.isEmpty()) {
+        if (sReloading || ATTEMPTS.isEmpty()) {
             return;
         }
 
@@ -356,7 +524,7 @@ public final class WifiAuthCleanupModule extends XposedModule {
         if (context == null) {
             return;
         }
-        new Handler(Looper.getMainLooper()).post(() -> {
+        ensureMainHandler().post(() -> {
             try {
                 Toast.makeText(context, TOAST_TEXT, Toast.LENGTH_LONG).show();
             } catch (Throwable t) {
@@ -404,9 +572,23 @@ public final class WifiAuthCleanupModule extends XposedModule {
             if (sWorker == null) {
                 HandlerThread thread = new HandlerThread("WifiAuthCleanup");
                 thread.start();
+                sWorkerThread = thread;
                 sWorker = new Handler(thread.getLooper());
             }
             return sWorker;
+        }
+    }
+
+    private static Handler ensureMainHandler() {
+        Handler handler = sMainHandler;
+        if (handler != null) {
+            return handler;
+        }
+        synchronized (LOCK) {
+            if (sMainHandler == null) {
+                sMainHandler = new Handler(Looper.getMainLooper());
+            }
+            return sMainHandler;
         }
     }
 

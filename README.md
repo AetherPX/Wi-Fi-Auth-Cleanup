@@ -13,6 +13,7 @@
 - 使用 HyperOS 认证失败广播和 Supplicant 认证错误双重检测。
 - 正确连接时立即结束跟踪，不影响正常保存的网络。
 - 删除失败时自动重试，成功后显示提示。
+- 支持 Xposed API 102 自动热重载，更新 APK 后无需重启“设置”进程。
 - 不读取密码内容，不持久化连接记录，也不申请网络权限。
 - 不包含配置界面、桌面图标或后台服务。
 
@@ -21,7 +22,7 @@
 | 项目 | 值 |
 | --- | --- |
 | 应用包名 | `io.github.aetherpx.wifiauthcleanup` |
-| Xposed API | 101 |
+| Xposed API | 102（minimum / target） |
 | 默认作用域 | `com.android.settings` |
 | `minSdk` | 33 |
 | `targetSdk` / `compileSdk` | 37 |
@@ -29,6 +30,8 @@
 | HyperOS 检测属性 | `ro.mi.os.version.name` |
 
 `minSdk` 对应 HyperOS 的 Android 基线，但不代表兼容所有 Android 13+ 系统。MIUI、AOSP 和其他厂商 ROM 会在运行时直接禁用模块。
+
+模块要求框架支持 Xposed API 102；API 101 框架无法加载此版本。
 
 ## 安装与使用
 
@@ -80,6 +83,22 @@ WifiManager.removeNetwork(networkId)
 
 模块不会持续轮询 Wi-Fi 状态。只有收到明确的认证失败信号后，才查询已保存网络并执行删除；如果框架仍在结束失败连接而暂时拒绝删除，则每 1.5 秒重试，最长跟踪 120 秒。
 
+### API 102 热重载
+
+模块只声明一个 Java 入口类，满足 API 102 的热重载要求；`module.prop` 启用了 `autoHotReload=true`。APK 更新触发热重载时，旧代码会：
+
+1. 停止接收新的 Hook 事件。
+2. 注销动态广播接收器。
+3. 清空主线程和工作线程回调。
+4. 停止并等待模块的 `HandlerThread` 退出。
+5. 清空仅存在于旧类加载器中的连接状态。
+
+新代码不会等待包生命周期回调重放，而是通过固定 Hook ID 原子替换旧的 `save()` 和 `connect()` Hook。更新发生时正在进行的 Wi-Fi 尝试会被放弃跟踪，之后的新连接会使用新代码。
+
+从 API 101 版本首次升级到本版本时，旧代码无法批准热重载，因此仍需强制停止一次“设置”或重启设备。完成首次 API 102 加载后，后续更新可自动热重载。
+
+自动更新仍要求新旧 APK 使用相同签名；仓库中的固定测试密钥满足当前测试构建的覆盖安装要求。
+
 ## 构建
 
 ### GitHub Actions
@@ -111,9 +130,9 @@ Release 构建启用了 R8 代码优化、混淆和资源压缩。AGP 9 即使�
 | 构建 | APK 大小 | DEX 类数量 |
 | --- | ---: | ---: |
 | 优化前 | 2,088,273 字节 | 1,090 |
-| R8 优化后 | 18,413 字节 | 8 |
+| API 102 + R8 | 21,181 字节 | 8 |
 
-体积减少约 **99.1%**。R8 映射文件位于：
+体积仍比未优化版本减少约 **99%**。不同 AGP/R8 版本生成的具体字节数可能略有变化。R8 映射文件位于：
 
 ```text
 app/build/outputs/mapping/release/mapping.txt
@@ -154,6 +173,14 @@ Monitoring connection attempt for "..."
 Supplicant authentication failure matched "..."
 removeNetwork(...) via authentication failure -> true
 Removed network "..." because authentication failed
+```
+
+热重载成功时会出现：
+
+```text
+Preparing API 102 hot reload
+Installed Wi-Fi hooks
+Hot reloaded on HyperOS ...
 ```
 
 非 HyperOS 系统只会记录 `HyperOS not detected; module disabled`。在 HyperOS 上，如果只有加载和 Hook 成功日志，却没有 `Monitoring connection attempt`，说明当前设置版本没有调用所 Hook 的连接入口；如果已有监控日志但没有认证失败记录，请保留完整 LSPosed 日志用于适配。
